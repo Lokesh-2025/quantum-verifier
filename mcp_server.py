@@ -1,0 +1,271 @@
+"""
+quantum-verifier MCP server.
+
+Thin wrapper — every real capability lives in core/ and providers/, which
+have zero MCP dependency and can be imported and used directly (in tests,
+scripts, another agent's code) without ever going through this file. This
+module's only job is exposing those functions as MCP tools.
+"""
+import json
+from mcp.server.fastmcp import FastMCP
+
+from core.verifier import verify as _verify
+from core.control_experiment import falsify as _falsify
+import providers.ibm as ibm
+import providers.ionq as ionq
+
+mcp = FastMCP("quantum-verifier")
+
+
+# --------------------------------------------------------------------------
+# Core: the Verifier and the control-experiment generator
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def verify_experiment(
+    qasm_string: str,
+    provider: str,
+    target_device: str,
+    shots: int = 4096,
+    expected_marked_bitstrings: list = None,
+    expected_amplification: float = None,
+    amplification_tolerance: float = 0.5,
+) -> str:
+    """
+    The safety gate. Checks a circuit's semantics, its routing/topology risk,
+    an ideal simulation, a hardware-aware simulation (real noise model on
+    IonQ; live-calibration fidelity estimate on IBM), and — if a known
+    answer is supplied — whether the claimed result is actually
+    distinguishable from predicted hardware behavior.
+
+    Args:
+        qasm_string   : OpenQASM 2.0 circuit string
+        provider      : "ibm" or "ionq"
+        target_device : e.g. "ibm_fez", "forte-1", "simulator"
+        shots         : shots for the simulation passes (default 4096)
+        expected_marked_bitstrings : optional, target bitstrings for a known-answer check
+        expected_amplification     : optional, predicted amplification to verify against
+        amplification_tolerance    : relative tolerance (default 0.5)
+
+    Returns a GO/BLOCK verdict with structured, human-readable reasons.
+    If no expected result is supplied, use falsify_claim instead — it
+    doesn't require knowing the answer in advance.
+    """
+    return json.dumps(_verify(
+        qasm_string, provider, target_device, shots,
+        expected_marked_bitstrings, expected_amplification, amplification_tolerance,
+    ), indent=2)
+
+
+@mcp.tool()
+def falsify_claim(
+    qasm_string: str,
+    provider: str,
+    target_device: str,
+    marked_bitstrings: list = None,
+    shots: int = 4096,
+) -> str:
+    """
+    Automatically generates a control circuit — the same circuit with its
+    entangling gates removed — and runs both through the same hardware-aware
+    simulation. The difference between them is the real, confound-isolated
+    effect size, with SPAM/readout bias (which affects both circuits
+    equally) subtracted out.
+
+    Works even without a known answer (true discovery-mode research) —
+    without marked_bitstrings, reports which bitstrings gained the most
+    probability from adding entanglement, and the overall distributional
+    distance between the real circuit and its control.
+
+    Args:
+        qasm_string        : OpenQASM 2.0 circuit string, must contain at
+                              least one entangling (two-qubit) gate
+        provider            : "ibm" or "ionq" (control-circuit comparison
+                              currently only returns counts on the IonQ path
+                              — IBM's hardware-aware simulation is a fidelity
+                              estimate, not raw counts)
+        target_device       : e.g. "forte-1", "simulator"
+        marked_bitstrings   : optional — if you have a specific claimed
+                              target, isolates its real effect size
+        shots               : shots per circuit (default 4096)
+    """
+    return json.dumps(_falsify(qasm_string, provider, target_device, marked_bitstrings, shots), indent=2)
+
+
+# --------------------------------------------------------------------------
+# IBM provider
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def list_devices() -> str:
+    """All accessible IBM backends with live operational status."""
+    return json.dumps(ibm.list_devices(), indent=2)
+
+
+@mcp.tool()
+def get_device_details(device_name: str) -> str:
+    """Per-qubit T1/T2, readout error, gate error, queue depth."""
+    return json.dumps(ibm.get_device_details(device_name), indent=2)
+
+
+@mcp.tool()
+def best_qubits(device_name: str, n: int = 5) -> str:
+    """Best n individual qubits on a device by live calibration."""
+    return json.dumps(ibm.best_qubits(device_name, n), indent=2)
+
+
+@mcp.tool()
+def compare_devices(sort_by: str = "cx_error") -> str:
+    """Rank IBM devices by cx_error, queue, qubits, or combined score."""
+    return json.dumps(ibm.compare_devices(sort_by), indent=2)
+
+
+@mcp.tool()
+def queue_status() -> str:
+    """Current queue snapshot across all IBM backends."""
+    return json.dumps(ibm.queue_status(), indent=2)
+
+
+@mcp.tool()
+def device_history(device_name: str, days: int = 7) -> str:
+    """Calibration snapshots over the last N days."""
+    return json.dumps(ibm.device_history(device_name, days), indent=2)
+
+
+@mcp.tool()
+def device_profile(device_name: str) -> str:
+    """Complete hardware profile from the most recent snapshot."""
+    return json.dumps(ibm.device_profile(device_name), indent=2)
+
+
+@mcp.tool()
+def device_on_date(device_name: str, date: str) -> str:
+    """Historical stats for a device on a specific past date."""
+    return json.dumps(ibm.device_on_date(device_name, date), indent=2)
+
+
+@mcp.tool()
+def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2) -> str:
+    """Compile and submit a circuit to an IBM quantum computer. Prefer calling verify_experiment first."""
+    return json.dumps(ibm.submit_job(device_name, qasm_string, shots, qasm_version), indent=2)
+
+
+@mcp.tool()
+def job_status(job_id: str) -> str:
+    """Status of a submitted IBM job."""
+    return json.dumps(ibm.job_status(job_id), indent=2)
+
+
+@mcp.tool()
+def job_results(job_id: str) -> str:
+    """Measurement counts from a completed IBM job."""
+    return json.dumps(ibm.job_results(job_id), indent=2)
+
+
+@mcp.tool()
+def cancel_job(job_id: str) -> str:
+    """Cancel a queued or running IBM job."""
+    return json.dumps(ibm.cancel_job(job_id), indent=2)
+
+
+@mcp.tool()
+def list_jobs(limit: int = 10) -> str:
+    """Most recently submitted IBM jobs."""
+    return json.dumps(ibm.list_jobs(limit), indent=2)
+
+
+@mcp.tool()
+def estimate_runtime(circuit: str, backend_name: str, shots: int = 1024) -> str:
+    """Estimate IBM QPU minutes for a circuit before submitting."""
+    return json.dumps(ibm.estimate_runtime(circuit, backend_name, shots), indent=2)
+
+
+@mcp.tool()
+def route_job(circuit: str, shots: int = 1024, max_minutes: float = 10.0) -> str:
+    """Recommend the best IBM device for a circuit based on cost and quality."""
+    return json.dumps(ibm.route_job(circuit, shots, max_minutes), indent=2)
+
+
+@mcp.tool()
+def get_alerts(device_name: str = "", days: int = 7) -> str:
+    """Calibration drift alerts for IBM devices."""
+    return json.dumps(ibm.get_alerts(device_name, days), indent=2)
+
+
+@mcp.tool()
+def start_repro_experiment(circuit: str, backend_name: str, n_runs: int = 5, shots: int = 1024) -> str:
+    """Submit the same circuit N times to measure reproducibility on real IBM hardware."""
+    return json.dumps(ibm.start_repro_experiment(circuit, backend_name, n_runs, shots), indent=2)
+
+
+@mcp.tool()
+def repro_score(experiment_id: int) -> str:
+    """0-1 reproducibility score after repeat runs complete."""
+    return json.dumps(ibm.repro_score(experiment_id), indent=2)
+
+
+@mcp.tool()
+def job_analytics() -> str:
+    """Breakdown of jobs submitted through this server, by tool."""
+    return json.dumps(ibm.job_analytics(), indent=2)
+
+
+# --------------------------------------------------------------------------
+# IonQ provider
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def ionq_devices() -> str:
+    """All IonQ backends and simulators with live status."""
+    return json.dumps(ionq.ionq_devices(), indent=2)
+
+
+@mcp.tool()
+def ionq_submit_job(
+    backend_name: str,
+    qasm_circuits: list,
+    shots: int = 1024,
+    optimization_level: int = 1,
+    expected_marked_bitstrings: list = None,
+    expected_amplification=None,
+    amplification_tolerance: float = 0.5,
+    confirm_real_hardware: bool = False,
+) -> str:
+    """
+    Submit one or more circuits to IonQ as a batched job, with a mandatory
+    self-check against the real target device's noise model before
+    anything is billed. Prefer calling verify_experiment first.
+    """
+    return json.dumps(ionq.ionq_submit_job(
+        backend_name, qasm_circuits, shots, optimization_level,
+        expected_marked_bitstrings, expected_amplification,
+        amplification_tolerance, confirm_real_hardware,
+    ), indent=2)
+
+
+@mcp.tool()
+def ionq_job_status(job_id: str, backend_name: str = "ionq_simulator") -> str:
+    """Status of a submitted IonQ job."""
+    return json.dumps(ionq.ionq_job_status(job_id, backend_name), indent=2)
+
+
+@mcp.tool()
+def ionq_job_results(job_id: str, backend_name: str = "simulator") -> str:
+    """Measurement counts from a completed IonQ job."""
+    return json.dumps(ionq.ionq_job_results(job_id, backend_name), indent=2)
+
+
+@mcp.tool()
+def estimate_ionq_gates(qasm_string: str, backend_name: str = "forte-1", optimization_level: int = 1) -> str:
+    """Native gate count (GPI/GPI2/ZZ) for a circuit before submitting."""
+    return json.dumps(ionq.estimate_ionq_gates(qasm_string, backend_name, optimization_level), indent=2)
+
+
+@mcp.tool()
+def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> str:
+    """Dollar cost preview using IonQ's real per-job pricing floor."""
+    return json.dumps(ionq.estimate_ionq_cost(qasm_circuits, shots), indent=2)
+
+
+if __name__ == "__main__":
+    mcp.run()
