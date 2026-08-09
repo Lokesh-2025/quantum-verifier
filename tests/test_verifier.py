@@ -23,6 +23,8 @@ pytestmark = pytest.mark.skipif(
     not IONQ_KEY_PRESENT, reason="IONQ_API_KEY not set — skipping live IonQ verifier tests"
 )
 
+from qiskit import QuantumCircuit
+
 import core.verifier as v
 import core.control_experiment as ce
 
@@ -211,6 +213,77 @@ def test_ionq_has_no_topology_risk():
     assert result["passed"] is True
 
 
+# ------------------------------------------------------------- gate synthesis checks
+
+def test_gate_synthesis_check_catches_the_real_historical_bug():
+    """Reproduces the exact shape of the real bug this project hit: a missing
+    RZZ->native-ZZ equivalence caused 1 logical rzz to transpile into 2
+    native two-qubit gates plus ~39 extraneous single-qubit gates. Hand-built
+    here (rather than relying on transpile still being broken, since it's
+    now fixed) so this stays a real regression test even after the fix."""
+    from core.verifier import gate_synthesis_check
+    logical = QuantumCircuit(2, 2)
+    logical.h(0); logical.h(1)
+    logical.rzz(0.5, 0, 1)
+    logical.h(0); logical.h(1)
+    logical.measure(0, 0); logical.measure(1, 1)
+
+    buggy_transpiled = QuantumCircuit(2, 2)
+    for _ in range(2):
+        buggy_transpiled.rz(0.1, 0)  # stand-in single-qubit native ops
+    for _ in range(37):
+        buggy_transpiled.rx(0.1, 0 if _ % 2 == 0 else 1)
+    buggy_transpiled.rzz(0.3, 0, 1)
+    buggy_transpiled.rzz(0.3, 0, 1)  # the bug: 2 native 2q gates for 1 logical rzz
+    buggy_transpiled.measure(0, 0); buggy_transpiled.measure(1, 1)
+
+    result = gate_synthesis_check(logical, buggy_transpiled)
+    assert result["passed"] is False
+    violation_checks = {v["check"] for v in result["violations"]}
+    assert "two_qubit_gate_inflation" in violation_checks
+    assert result["logical_two_qubit_gates"] == 1
+    assert result["transpiled_two_qubit_gates"] == 2
+
+
+def test_gate_synthesis_check_passes_clean_transpile():
+    from core.verifier import gate_synthesis_check
+    logical = QuantumCircuit(2, 2)
+    logical.h(0); logical.h(1)
+    logical.rzz(0.5, 0, 1)
+    logical.measure(0, 0); logical.measure(1, 1)
+
+    clean_transpiled = QuantumCircuit(2, 2)
+    clean_transpiled.rz(0.1, 0); clean_transpiled.rx(0.1, 0)
+    clean_transpiled.rz(0.1, 1); clean_transpiled.rx(0.1, 1)
+    clean_transpiled.rzz(0.3, 0, 1)  # 1:1 mapping, as the fixed equivalence now produces
+    clean_transpiled.measure(0, 0); clean_transpiled.measure(1, 1)
+
+    result = gate_synthesis_check(logical, clean_transpiled)
+    assert result["passed"] is True
+    assert result["violations"] == []
+
+
+def test_ionq_e1_ring_gate_synthesis_check_passes_after_the_fix():
+    """End-to-end: the real E1_RING circuit, which triggered the original
+    bug (10 rzz -> 20 native zz), must now pass gate_synthesis_check when
+    transpiled against a real Forte-class device's native gateset (zz).
+    Uses target_device="forte-1" rather than the bare "simulator" alias --
+    the latter transpiles against qiskit_ionq's generic simulator backend,
+    whose DEFAULT native gateset is the legacy MS gate (Aria-only, retired),
+    not Forte's zz gate. That's a separate, real gap (the RZZ->ZZ
+    equivalence registered for this fix doesn't cover the MS path, and MS
+    isn't the right target for Forte-class hardware anyway) -- noted, not
+    fixed here, since it's a different bug than the one this check targets.
+    Execution still stays on the free simulator either way; only the
+    transpile TARGET and applied noise model change with target_device."""
+    result = v.verify(E1_RING, provider="ionq", target_device="forte-1", shots=256,
+                       expected_marked_bitstrings=TARGET_BITSTRINGS, expected_amplification=21.5,
+                       amplification_tolerance=0.6)
+    gsc = result["hardware_aware_simulation"]["gate_synthesis_check"]
+    assert gsc["passed"] is True, gsc
+    assert gsc["logical_two_qubit_gates"] == gsc["transpiled_two_qubit_gates"] == 10
+
+
 # ------------------------------------------------------------- ground-truth checks
 
 def test_blocks_false_amplification_claim():
@@ -218,6 +291,36 @@ def test_blocks_false_amplification_claim():
                        expected_marked_bitstrings=["00"], expected_amplification=10.0)
     assert result["verdict"] == "BLOCK"
     assert "not distinguishable" in result["reason"].lower()
+
+
+def test_blocks_wrong_measurement_basis_claim():
+    """A circuit that claims to reveal an X-basis state (|+>) via measurement,
+    but forgot the basis-change H before measuring, so it's actually
+    measuring in the Z basis. |+> is genuinely deterministic (100% '0') in
+    the X basis but 50/50 in the Z basis -- the Verifier must catch that the
+    claim doesn't survive contact with what the circuit actually measures."""
+    missing_basis_change = (
+        'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\ncreg c[1];\n'
+        "h q[0];\nmeasure q[0] -> c[0];\n"  # prepares |+> but never rotates back before measuring
+    )
+    result = v.verify(missing_basis_change, provider="ionq", target_device="simulator", shots=2048,
+                       expected_marked_bitstrings=["0"], expected_amplification=2.0,
+                       amplification_tolerance=0.2)
+    assert result["verdict"] == "BLOCK"
+    assert "not distinguishable" in result["reason"].lower()
+
+
+def test_passes_correct_measurement_basis_claim():
+    """Same claim, correct circuit -- the basis-change H before measurement
+    is present, so |+> really does collapse deterministically to '0'."""
+    correct_basis_change = (
+        'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\ncreg c[1];\n'
+        "h q[0];\nh q[0];\nmeasure q[0] -> c[0];\n"
+    )
+    result = v.verify(correct_basis_change, provider="ionq", target_device="simulator", shots=2048,
+                       expected_marked_bitstrings=["0"], expected_amplification=2.0,
+                       amplification_tolerance=0.2)
+    assert result["verdict"] == "GO"
 
 
 def test_passes_true_amplification_claim():

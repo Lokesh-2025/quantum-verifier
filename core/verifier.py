@@ -30,12 +30,64 @@ Pipeline:
                            auto-generate a falsifying control circuit.
   6. GO / BLOCK verdict, with structured, human-readable reasons.
 """
+import math
+
 from qiskit import QuantumCircuit, transpile
+from qiskit.circuit import Parameter
+from qiskit.circuit.library import RZZGate
+from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary as _sel
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 from providers.ibm import _get_service, _cx_errors_for_backend
 
 HEAVY_HEX_MAX_DEGREE = 3
+
+# Qiskit's transpiler has no direct equivalence between RZZGate (radians) and
+# IonQ's native ZZGate (turns), even though they are the exact same physical
+# gate — RZZ(theta) = exp(-i*theta/2 * Z@Z) and native ZZ(phi) = exp(-i*pi*phi
+# * Z@Z), so phi = theta/(2*pi) is an EXACT match, verified via Operator
+# comparison (identical, not just up to global phase). Without this
+# registered, the transpiler falls back to general two-qubit unitary
+# synthesis: a single rzz between two H gates transpiled to 2 native zz
+# gates (should be 1) plus ~39 extraneous single-qubit gpi/gpi2 gates. That
+# silently produced a wrong "hardware-aware simulation" for any circuit
+# containing rzz — caught via the free-simulator control-arm check for the
+# Forte angle-error experiment before it ever reached real hardware.
+def _register_ionq_native_equivalences():
+    try:
+        from qiskit_ionq.ionq_gates import ZZGate as _IonQZZGate
+    except ImportError:
+        return
+    theta = Parameter("theta")
+    equiv = QuantumCircuit(2)
+    equiv.append(_IonQZZGate(theta / (2 * math.pi)), [0, 1])
+    _sel.add_equivalence(RZZGate(theta), equiv)
+
+
+_register_ionq_native_equivalences()
+
+# IonQ's native ZZ gate is only valid for |theta_turns| <= 0.25 (a quarter
+# turn) -- confirmed via a real IonQ API rejection ("angle must be >= -0.25")
+# when the E1_RING circuit's large rzz angles (>pi/2 radians) hit the 1:1
+# equivalence above. Splitting into N chained smaller RZZ applications is
+# mathematically EXACT, not an approximation: ZZ generators on the same
+# qubit pair commute, so N reps of RZZ(theta/N) = RZZ(theta) exactly (the
+# same identity the angle-error experiment's own protocol relies on).
+IONQ_NATIVE_ZZ_MAX_TURNS = 0.25
+
+
+def _decompose_large_angle_rzz(circuit: QuantumCircuit) -> QuantumCircuit:
+    new_qc = circuit.copy_empty_like()
+    for instruction in circuit.data:
+        if instruction.operation.name == "rzz":
+            theta = float(instruction.operation.params[0])
+            theta_turns = theta / (2 * math.pi)
+            n_chunks = max(1, math.ceil(abs(theta_turns) / IONQ_NATIVE_ZZ_MAX_TURNS))
+            for _ in range(n_chunks):
+                new_qc.rzz(theta / n_chunks, instruction.qubits[0], instruction.qubits[1])
+        else:
+            new_qc.append(instruction.operation, instruction.qubits, instruction.clbits)
+    return new_qc
 
 
 def _parse(qasm_string: str) -> QuantumCircuit:
@@ -129,6 +181,71 @@ def topology_check(circuit: QuantumCircuit, provider: str) -> dict:
 
 
 # ---------------------------------------------------------------- step 3
+GATE_INFLATION_MAX_RATIO = 8.0
+TWO_QUBIT_GATE_INFLATION_MAX_RATIO = 1.5
+
+
+def _count_two_qubit_gates(circuit: QuantumCircuit) -> int:
+    return sum(1 for instr in circuit.data if len(instr.qubits) == 2)
+
+
+def gate_synthesis_check(circuit: QuantumCircuit, transpiled: QuantumCircuit) -> dict:
+    """
+    Catches the real-world form of "wrong native gate family": a circuit
+    whose gates don't map cleanly onto the target's native gateset, forcing
+    the transpiler to fall back to expensive general unitary re-synthesis
+    instead of a direct translation. Same spirit as topology_check flagging
+    heavy-hex degree violations — this is the gate-basis equivalent.
+
+    This is exactly the failure mode this project hit for real: a missing
+    RZZ->native-ZZ equivalence caused a single rzz to transpile into 2
+    native two-qubit gates (should be 1) plus ~39 extraneous single-qubit
+    gates, silently producing a "hardware-aware simulation" of the wrong
+    circuit. Registering the correct equivalence (see the module-level
+    _register_ionq_native_equivalences call) fixes IonQ's RZZ case
+    specifically; this check exists to catch the *general* class for any
+    gate/target combination that hits the same kind of gap.
+    """
+    logical_ops = {k: v for k, v in circuit.count_ops().items() if k not in ("measure", "barrier")}
+    transpiled_ops = {k: v for k, v in transpiled.count_ops().items() if k not in ("measure", "barrier")}
+    logical_total = sum(logical_ops.values())
+    transpiled_total = sum(transpiled_ops.values())
+    inflation_ratio = (transpiled_total / logical_total) if logical_total else 1.0
+
+    logical_2q = _count_two_qubit_gates(circuit)
+    transpiled_2q = _count_two_qubit_gates(transpiled)
+    two_qubit_inflation_ratio = (transpiled_2q / logical_2q) if logical_2q else 1.0
+
+    violations = []
+    if inflation_ratio > GATE_INFLATION_MAX_RATIO:
+        violations.append({
+            "check": "total_gate_inflation",
+            "logical_gate_count": logical_total, "transpiled_gate_count": transpiled_total,
+            "inflation_ratio": round(inflation_ratio, 2),
+            "message": f"Transpiled gate count is {inflation_ratio:.1f}x the logical count "
+                       f"(threshold {GATE_INFLATION_MAX_RATIO}x) — likely a missing direct "
+                       "equivalence to the target's native gateset, not real routing overhead.",
+        })
+    if logical_2q and two_qubit_inflation_ratio > TWO_QUBIT_GATE_INFLATION_MAX_RATIO:
+        violations.append({
+            "check": "two_qubit_gate_inflation",
+            "logical_two_qubit_gates": logical_2q, "transpiled_two_qubit_gates": transpiled_2q,
+            "inflation_ratio": round(two_qubit_inflation_ratio, 2),
+            "message": f"{logical_2q} logical two-qubit gate(s) became {transpiled_2q} native "
+                       f"two-qubit gate(s) ({two_qubit_inflation_ratio:.1f}x, threshold "
+                       f"{TWO_QUBIT_GATE_INFLATION_MAX_RATIO}x) — a correctly-mapped native gate "
+                       "should be close to 1:1, not require multi-gate re-synthesis.",
+        })
+
+    return {
+        "passed": len(violations) == 0,
+        "logical_gate_count": logical_total, "transpiled_gate_count": transpiled_total,
+        "inflation_ratio": round(inflation_ratio, 2),
+        "logical_two_qubit_gates": logical_2q, "transpiled_two_qubit_gates": transpiled_2q,
+        "violations": violations,
+    }
+
+
 def ideal_simulation(circuit: QuantumCircuit, shots: int = 4096) -> dict:
     """What SHOULD happen with zero noise — the ground truth to compare against."""
     from qiskit_aer import AerSimulator
@@ -161,11 +278,24 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
         from providers.ionq import _resolve_ionq_backend, _ionq_is_hardware
         resolved = _resolve_ionq_backend(target_device)
         ionq_provider = IonQProvider(api_key)
-        target_backend = ionq_provider.get_backend(resolved, gateset="native")
+        # Transpiling against the bare "ionq_simulator" target silently picks
+        # its DEFAULT native gateset, which is the legacy Aria-only MS gate,
+        # not Forte's zz -- the exact trap estimate_ionq_gates/estimate_ionq_cost
+        # already document and avoid by defaulting to forte-1's real target.
+        # A gate-count/structure check needs a REAL device's native gateset
+        # even when no noise model will be applied (no specific hardware
+        # requested), so target the transpile at forte-1 in that case while
+        # still executing on the free simulator with no noise.
+        transpile_target_name = "qpu.forte-1" if resolved == "ionq_simulator" else resolved
+        target_backend = ionq_provider.get_backend(transpile_target_name, gateset="native")
         sim_backend = ionq_provider.get_backend("ionq_simulator", gateset="native")
         if _ionq_is_hardware(resolved):
             sim_backend.set_options(noise_model=resolved.replace("qpu.", ""))
-        t_qc = transpile(circuit, backend=target_backend, optimization_level=1)
+        # Split any rzz beyond the native gate's valid angle range BEFORE
+        # transpiling, so the 1:1 equivalence applies cleanly to every chunk
+        # instead of the transpiler rejecting/mis-synthesizing an out-of-range angle.
+        decomposed_circuit = _decompose_large_angle_rzz(circuit)
+        t_qc = transpile(decomposed_circuit, backend=target_backend, optimization_level=1)
         sim_job = sim_backend.run(t_qc, shots=shots)
         counts = sim_job.result().get_counts()
         noise_model_used = sim_backend.options.noise_model
@@ -179,6 +309,7 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
             "noise_model_used": noise_model_used,
             "transpiled_gate_count": t_qc.size(),
             "simulation_type": simulation_type,
+            "gate_synthesis_check": gate_synthesis_check(decomposed_circuit, t_qc),
         }
 
     # IBM
@@ -200,6 +331,7 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
         "transpiled_gate_count": sum(transpiled_gates.values()),
         "n_two_qubit_gates": n_cx,
         "simulation_type": "fidelity estimate from live calibration data (not a full noisy simulation)",
+        "gate_synthesis_check": gate_synthesis_check(circuit, isa_circuit),
     }
 
 
@@ -276,6 +408,14 @@ def verify(
     result["hardware_aware_simulation"] = hw
     if "error" in hw:
         return {**result, "verdict": "BLOCK", "reason": hw["error"]}
+
+    gsc = hw.get("gate_synthesis_check")
+    if gsc and not gsc["passed"]:
+        return {**result, "verdict": "BLOCK",
+                "reason": "Gate synthesis check failed — the circuit doesn't map cleanly onto "
+                           "the target's native gateset, likely a missing gate equivalence rather "
+                           "than real hardware overhead.",
+                "details": gsc}
 
     if expected_marked_bitstrings and expected_amplification is not None:
         gt = ground_truth_check(hw.get("counts"), expected_marked_bitstrings,

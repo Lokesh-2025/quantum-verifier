@@ -318,12 +318,13 @@ def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> dict:
             confidence = "high — verified empirically for circuits in this size range"
         else:
             estimated_total = JOB_FLOOR_USD + ROUGH_USD_PER_2Q_GATE * max_two_qubit_gates
-            confidence = "LOW — extrapolated from a single data point"
+            confidence = "LOW — extrapolated from a single data point, verify on IonQ's real calculator before relying on this"
         return {
             "num_circuits_in_batch": len(qasm_circuits), "shots_per_circuit": shots,
             "per_circuit": per_circuit, "job_floor_usd": JOB_FLOOR_USD,
             "likely_at_floor": likely_at_floor,
             "estimated_total_usd": round(estimated_total, 2), "confidence": confidence,
+            "note": "This is ONE job (batched) — all circuits above share this one floor, not pay it individually.",
         }
     except Exception as e:
         return {"error": str(e)}
