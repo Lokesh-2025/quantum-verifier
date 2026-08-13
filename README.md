@@ -28,6 +28,8 @@ Fixing it surfaced two more real issues in the same code path:
 
 All three are now fixed, and the fix itself became a permanent, general check (`gate_synthesis_check`) rather than a one-off patch — so the next circuit that hits this class of bug gets caught automatically. The angle-error experiment's own safety check still isn't fully clean after the fix (a smaller, reproducible discrepancy remains), so — correctly — that experiment stays blocked from real hardware until it is. That refusal is the tool doing exactly what it's for.
 
+**Update — first real hardware confirmation.** A separate, unrelated experiment (a graded series of entangling search circuits on IonQ, looking for a specific number in Pascal's Triangle) went through the full pipeline this project's discipline requires: checked, cost-estimated, budget-verified, submitted for real, and confirmed. All three circuits found the right answer on real Forte-Enterprise-1 hardware. Along the way, this same discipline caught two more real, separate problems before they cost anything: an API key silently pointed at the wrong, unfunded organization for an unknown period, and a cost estimate that was quietly wrong by roughly 2x because two other functions (`estimate_ionq_cost`, `estimate_ionq_gates`) had the same missing gate-decomposition fix as above, just not yet applied there. Both fixed, both now covered by real tests, not just fixed and forgotten.
+
 ---
 
 ## What it does
@@ -59,7 +61,13 @@ circuit + target device + (optional) expected result
 
 **`falsify_claim`** — the flagship capability. Automatically builds a *control circuit*: the same circuit with its entangling gates removed, everything else identical. Runs both through the same hardware-aware simulation and reports the real, confound-isolated effect size — SPAM/readout bias, which affects both circuits equally, cancels out. Works even with no known expected answer, which is what makes it usable for genuine discovery-mode research, not just checking known claims.
 
-Plus the general-purpose device-intelligence, job-lifecycle, and IonQ pre-flight tooling, carried over from `quantum-hardware-mcp`.
+**`find_robust_circuit`** — picks the most real-noise-resistant option between candidate circuits, instead of whichever scores best in a perfect, noiseless simulation. This is a real, proven lesson, not a hypothetical: a circuit tuned purely for best-case ideal performance was found to be ~2.5x weaker on real hardware than a lower-scoring-on-paper alternative this tool found by scoring against real noise and validating on a held-out run.
+
+**`ionq_preflight`** — one call for the whole recommended pre-submission sequence (account/budget check, device standing, per-circuit verification, real cost check) instead of remembering to call four or five tools in the right order.
+
+**Experiment Memory + Intelligence** (`memory_summary`, `recommend_tolerance`) — every real self-check prediction gets logged automatically; once a real job completes, `ionq_sync_memory_for_job` records what actually happened next to it. `recommend_tolerance` uses that real accuracy history to recommend a tolerance for a given provider/device instead of a guessed default — honestly falling back to the default when there isn't yet enough real data to justify anything more specific.
+
+Plus the general-purpose device-intelligence, job-lifecycle, account/budget visibility (`ionq_account_check`, `ibm_account_check`), and IonQ pre-flight tooling, carried over from and extended beyond `quantum-hardware-mcp`.
 
 ---
 
@@ -81,25 +89,31 @@ Plus the general-purpose device-intelligence, job-lifecycle, and IonQ pre-flight
 
 This is a separate, focused project — `quantum-hardware-mcp` is untouched. This repo carries over only the genuinely general-purpose device and job tools (device intelligence, job lifecycle, IonQ's self-checked submission pattern) and builds the Verifier and control-experiment generator fresh.
 
-Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the chemistry planner, and the toy algorithm runners (`run_grover`, `run_vqe`) — those stay in the main repo. Also deliberately not built yet: an Experiment Memory / Postmortem / recommendation layer on top of the Verifier — that comes once this phase has produced enough real data to learn from.
+Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the chemistry planner, and the toy algorithm runners (`run_grover`, `run_vqe`) — those stay in the main repo.
 
-**Known gap:** right now these are two separate tool sets. Nothing forces `quantum-hardware-mcp`'s job-submission tools to route through this Verifier first — an assistant using the main tool today could still submit straight to hardware without it. Wiring the Verifier in as a mandatory, automatic gate in front of the main tool's submission path is the next real step, not yet done.
+**One real, minimal, well-tested exception to "untouched":** a correctness bug in `quantum-hardware-mcp`'s own `ionq_submit_job` self-check — the same missing RZZ→native-ZZ equivalence described above — was ported back into that repo directly, since it was silently mispredicting results in that function's own stated safety guarantee. Nothing else in the main repo was touched; the full existing test suite there (92/92) passed unchanged before this was committed.
+
+**Still a real gap, not yet closed:** these remain two separate tool sets, and nothing structurally forces `quantum-hardware-mcp`'s job-submission tools to route through this Verifier's full pipeline first — an assistant using the main tool today could still submit straight to hardware without calling `verify_experiment` or `ionq_preflight`. The specific bug that gap would have caught is now fixed at the source either way, but the general "automatic, no way around it" gate this project originally set out to build is still not structurally enforced.
 
 ---
 
-## Tools (27 total)
+## Tools (35 total)
 
-### Core — the Verifier and control-experiment generator
+### Core — the Verifier, control-experiment generator, robustness, and learning
 
 | Tool | What it does |
 |------|-------------|
 | `verify_experiment` | The safety gate — semantic, routing, gate-synthesis, and ground-truth checks, ending in a GO/BLOCK verdict |
 | `falsify_claim` | Auto-generates a control circuit (entangling gates removed) and reports the real, confound-isolated effect size — no known answer required |
+| `find_robust_circuit` | Picks the most real-noise-resistant candidate between several circuits, instead of whichever wins in a perfect noiseless simulation |
+| `memory_summary` | How trustworthy this tool's predictions have really been, by provider/device, from real recorded prediction-vs-reality pairs |
+| `recommend_tolerance` | Data-driven `amplification_tolerance` recommendation from real accuracy history — honest default fallback with too little data |
 
-### IBM — device intelligence and job lifecycle
+### IBM — device intelligence, job lifecycle, and account visibility
 
 | Tool | What it does |
 |------|-------------|
+| `ibm_account_check` | Which IBM instance(s) this account can access and real usage quota status (seconds of QPU time on the free plan — genuinely different from IonQ's dollar budgets, not just re-labeled) |
 | `list_devices` | All accessible IBM backends with live operational status |
 | `get_device_details` | Per-qubit T1/T2, readout error, gate error, queue depth |
 | `best_qubits` | Score and rank qubits by calibration quality |
@@ -120,16 +134,20 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 | `repro_score` | KL-divergence reproducibility score |
 | `job_analytics` | Aggregate stats across logged jobs |
 
-### IonQ — devices, batched submission, cost estimation
+### IonQ — devices, batched submission, cost estimation, account visibility
 
 | Tool | What it does |
 |------|-------------|
+| `ionq_account_check` | Which IonQ project(s)/organization this API key can submit to and their real budget status — flags any at $0. Built after this project spent an unknown stretch of time pointed at the wrong, unfunded organization |
+| `ionq_compare_devices` | Ranks real IonQ hardware by live calibration data (2-qubit fidelity, coherence, gate speed) instead of picking one out of habit |
+| `ionq_preflight` | One call for the full recommended pre-submission sequence — account/budget check, device standing, per-circuit verification, real cost check — returning a single GO/BLOCK verdict |
 | `ionq_devices` | All IonQ backends and simulators with live status |
-| `ionq_submit_job` | Batched submission with a pre-flight self-check on the free simulator (real target device's noise model applied) before anything real is billed — one bad circuit refuses the whole batch |
+| `ionq_submit_job` | Batched submission with a pre-flight self-check *and* a real budget check on the free simulator before anything real is billed — one bad circuit, or a job estimated to exceed remaining budget, refuses the whole batch |
 | `ionq_job_status` | Job status, with `is_real_hardware` always reported explicitly |
 | `ionq_job_results` | Measurement counts, single or batched |
+| `ionq_sync_memory_for_job` | Fetches a completed real job's actual results and records them against the prediction made at submission time — closes the Experiment Memory loop |
 | `estimate_ionq_gates` | Native gate count before submitting, transpiled against a real device's actual native target |
-| `estimate_ionq_cost` | Dollar cost preview using IonQ's real per-job pricing floor |
+| `estimate_ionq_cost` | Dollar cost range using IonQ's real per-job pricing floor — reports low/high rather than a fake-precise single number, since two real data points disagree on the per-gate rate by 2.65x |
 
 ---
 
@@ -139,17 +157,25 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 quantum-verifier/
 ├── core/
 │   ├── verifier.py            # the safety-gate pipeline
-│   └── control_experiment.py  # auto-generated control circuits
+│   ├── control_experiment.py  # auto-generated control circuits
+│   ├── robustness.py          # find_robust_circuit — real-noise-aware selection
+│   ├── memory.py               # Experiment Memory — prediction-vs-reality tracking
+│   └── intelligence.py        # recommend_tolerance — data-driven, on top of memory
 ├── providers/
-│   ├── ibm.py                 # device intelligence + job lifecycle
-│   └── ionq.py                # device listing, batched self-checked submission
+│   ├── ibm.py                 # device intelligence, job lifecycle, account/quota check
+│   └── ionq.py                # device listing, batched self-checked submission,
+│                                # account/budget check, preflight orchestrator
 ├── mcp_server.py               # thin MCP wrapper — core/ and providers/ have
 │                                # zero MCP dependency and can be imported and
 │                                # used directly, without ever touching this file
 ├── tests/
 │   ├── test_canaries.py             # endianness + angle-unit regression baseline
 │   ├── test_verifier.py             # injected-bug benchmark, real research circuits
-│   └── test_side_by_side_old_repo.py  # confirms copied tools match the originals
+│   ├── test_side_by_side_old_repo.py  # confirms copied tools match the originals
+│   ├── test_ionq_tooling.py         # account/device/robustness/budget checks
+│   ├── test_ibm_tooling.py          # IBM account/quota check
+│   └── test_intelligence.py         # recommend_tolerance
+├── experiment_memory.db        # local SQLite store, gitignored — Experiment Memory's data
 └── requirements.txt
 ```
 
@@ -161,7 +187,7 @@ quantum-verifier/
 pytest tests/
 ```
 
-24 tests — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection (the real bug class described above), wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, and a side-by-side diff against the original tool proving the copied device/job functions didn't silently drift. All simulator-only — zero real hardware credits spent building or verifying this.
+41 tests across 6 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), and `recommend_tolerance` correctly recovering a controlled, known error rate. All simulator-only or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above).
 
 `test_side_by_side_old_repo.py` needs `quantum-hardware-mcp` cloned as a sibling directory (`~/quantum-hardware-mcp`) with its own dependencies installed, since it imports that repo directly to diff against it.
 
@@ -208,12 +234,22 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] `gate_synthesis_check` — catches gate-family mismatches before they corrupt a simulation
 - [x] IBM device intelligence + job lifecycle, carried over and diff-verified against the original
 - [x] IonQ devices, batched self-checked submission, cost/gate estimation
-- [x] Found and fixed a real transpile bug affecting already-shipped results (see above)
+- [x] Found and fixed a real transpile bug affecting already-shipped results
+- [x] **First real, confirmed hardware result** — a real IonQ job, real money, real answer found correctly on Forte-Enterprise-1
+- [x] `find_robust_circuit` — real-noise-aware circuit selection, proven against a real ~2.5x-weaker-than-necessary result this project shipped by accident
+- [x] `ionq_account_check` / `ibm_account_check` — real account/budget/quota visibility for both providers
+- [x] `ionq_compare_devices` — live calibration-based device ranking for IonQ
+- [x] `ionq_preflight` — the full recommended sequence in one call
+- [x] Real budget/quota preflight checks wired into both `ionq_submit_job` and IBM's `submit_job`
+- [x] Experiment Memory (`memory_summary`, automatic prediction logging, `ionq_sync_memory_for_job`) — built once real prediction-vs-reality data existed to learn from
+- [x] Intelligence layer (`recommend_tolerance`) — first real, bounded, honestly-caveated recommendation built on top of Memory
+- [x] The one deliberate exception to "`quantum-hardware-mcp` stays untouched" — its own `ionq_submit_job` had the identical unfixed RZZ bug in its own stated safety guarantee; ported the fix back, verified against its full existing test suite (92/92 unchanged) before committing
 
 **Next**
-- [ ] Wire this Verifier in as a mandatory, automatic gate in front of `quantum-hardware-mcp`'s job-submission tools, rather than two separate tool sets
+- [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bug is fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
 - [ ] Resolve the residual discrepancy still blocking the angle-error experiment from real hardware
-- [ ] Experiment Memory / Postmortem layer, built on real prediction-vs-reality data once available
+- [ ] Postmortem — automatic explanation of *why* a specific prediction was wrong, not just that it was; needs more real failure-mode data than currently exists
+- [ ] Port the "bare `simulator` target defaults to legacy MS gateset" fix into `quantum-hardware-mcp`'s `ionq_submit_job` too — same bug class as the one already ported, not yet done for this specific variant
 - [ ] IBM hardware-aware simulation as a full noisy simulation, not just a fidelity estimate, if IBM's public API ever exposes an equivalent to IonQ's named noise models
 
 ---
