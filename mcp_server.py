@@ -13,6 +13,7 @@ from core.verifier import verify as _verify
 from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
+from core.intelligence import recommend_tolerance as _recommend_tolerance
 import providers.ibm as ibm
 import providers.ionq as ionq
 
@@ -384,6 +385,19 @@ def memory_summary(provider: str = None) -> str:
     be read with real caution.
     """
     return json.dumps(_memory_summary(provider), indent=2)
+
+
+@mcp.tool()
+def recommend_tolerance(provider: str, target_device: str, default: float = 0.5) -> str:
+    """
+    Recommends an amplification_tolerance based on this tool's REAL
+    historical prediction accuracy for this specific provider/device
+    (from Experiment Memory) — not a guessed default applied everywhere.
+    Falls back honestly to the plain default when there isn't yet enough
+    real data (fewer than 3 recorded prediction-vs-reality pairs) to
+    justify anything more specific.
+    """
+    return json.dumps(_recommend_tolerance(provider, target_device, default), indent=2)
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ def record_prediction(qasm_string: str, provider: str, target_device: str,
         "INSERT INTO predictions (timestamp, provider, target_device, circuit_hash, "
         "circuit_index_in_job, marked_bitstrings, predicted_amplification, source) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (datetime.datetime.utcnow().isoformat(), provider, target_device,
+        (datetime.datetime.now(datetime.timezone.utc).isoformat(), provider, target_device,
          _circuit_hash(qasm_string), circuit_index_in_job,
          json.dumps(marked_bitstrings) if marked_bitstrings else None,
          predicted_amplification, source),
@@ -101,7 +101,7 @@ def record_real_result(prediction_id: int, real_amplification: float, real_job_i
     cur = conn.execute(
         "UPDATE predictions SET real_amplification = ?, real_job_id = ?, real_result_recorded_at = ? "
         "WHERE id = ?",
-        (real_amplification, real_job_id, datetime.datetime.utcnow().isoformat(), prediction_id),
+        (real_amplification, real_job_id, datetime.datetime.now(datetime.timezone.utc).isoformat(), prediction_id),
     )
     conn.commit()
     updated = cur.rowcount
