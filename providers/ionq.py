@@ -118,12 +118,19 @@ def ionq_devices() -> dict | list:
 _JOB_FLOOR_USD = 168.20
 _KNOWN_ABOVE_FLOOR_POINT_2Q_GATES = 600
 _KNOWN_ABOVE_FLOOR_POINT_USD = 3294.87
+# Deliberately the HIGHER of the two real above-floor rates now known (see
+# estimate_ionq_cost's docstring -- a real batched job came in at a rate
+# 2.65x lower than this one). Budget-refusal safety logic should stay
+# conservative and over-estimate rather than under-estimate; the honest
+# wide range belongs in estimate_ionq_cost's own output, not silently
+# baked into whether a submission gets blocked.
 _ROUGH_USD_PER_2Q_GATE = (_KNOWN_ABOVE_FLOOR_POINT_USD - _JOB_FLOOR_USD) / _KNOWN_ABOVE_FLOOR_POINT_2Q_GATES
 
 
 def _estimate_cost_from_circuits(decomposed_circuits: list) -> float:
-    """Same cost model as estimate_ionq_cost, applied to already-decomposed
-    circuits (so it reflects the real gate count that will actually run)."""
+    """Same (deliberately conservative/high) cost model used for the budget
+    preflight check, applied to already-decomposed circuits (so it reflects
+    the real gate count that will actually run)."""
     max_two_qubit_gates = max(
         (sum(1 for instr in qc.data if instr.operation.name == "rzz") for qc in decomposed_circuits),
         default=0,
@@ -390,11 +397,25 @@ def estimate_ionq_gates(qasm_string: str, backend_name: str = "forte-1", optimiz
 
 
 def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> dict:
-    """Dollar cost preview using IonQ's real per-job pricing floor, verified against IonQ's own resource estimator."""
+    """
+    Dollar cost preview using IonQ's real per-job pricing floor.
+
+    Above the floor, this reports a RANGE, not a single number, and that's
+    a deliberate honesty choice, not a hedge: two real data points exist
+    for above-floor pricing now (an original single-circuit point at 600
+    two-qubit gates -> $3294.87, and a real batched job this project ran
+    at 36 max two-qubit gates -> $238.96 actually charged), and they imply
+    per-gate rates 2.65x apart ($5.21 vs $1.97). That's real evidence a
+    simple "cost scales linearly with the hardest single circuit's gate
+    count" model isn't well-supported — it may actually depend on total
+    gates across the whole batch, not just the worst circuit, or scale
+    non-linearly, and there isn't yet enough real data to tell which.
+    Reporting one fake-precise number here would be less honest than this
+    range, even though the range is wide.
+    """
     JOB_FLOOR_USD = 168.20
-    KNOWN_ABOVE_FLOOR_POINT_2Q_GATES = 600
-    KNOWN_ABOVE_FLOOR_POINT_USD = 3294.87
-    ROUGH_USD_PER_2Q_GATE = (KNOWN_ABOVE_FLOOR_POINT_USD - JOB_FLOOR_USD) / KNOWN_ABOVE_FLOOR_POINT_2Q_GATES
+    HIGH_RATE_USD_PER_2Q_GATE = (3294.87 - JOB_FLOOR_USD) / 600       # original single-circuit point
+    LOW_RATE_USD_PER_2Q_GATE = (238.956544 - JOB_FLOOR_USD) / 36      # real batched job, 2026-08-13
 
     if isinstance(qasm_circuits, str):
         qasm_circuits = [qasm_circuits]
@@ -419,16 +440,20 @@ def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> dict:
             })
         likely_at_floor = max_two_qubit_gates <= 20
         if likely_at_floor:
-            estimated_total = JOB_FLOOR_USD
+            low = high = JOB_FLOOR_USD
             confidence = "high — verified empirically for circuits in this size range"
         else:
-            estimated_total = JOB_FLOOR_USD + ROUGH_USD_PER_2Q_GATE * max_two_qubit_gates
-            confidence = "LOW — extrapolated from a single data point, verify on IonQ's real calculator before relying on this"
+            low = JOB_FLOOR_USD + LOW_RATE_USD_PER_2Q_GATE * max_two_qubit_gates
+            high = JOB_FLOOR_USD + HIGH_RATE_USD_PER_2Q_GATE * max_two_qubit_gates
+            confidence = ("LOW — two real data points disagree on the per-gate rate by 2.65x; "
+                          "this range spans both. Budget for the HIGH end, verify on IonQ's "
+                          "real calculator before relying on this for anything precise.")
         return {
             "num_circuits_in_batch": len(qasm_circuits), "shots_per_circuit": shots,
             "per_circuit": per_circuit, "job_floor_usd": JOB_FLOOR_USD,
             "likely_at_floor": likely_at_floor,
-            "estimated_total_usd": round(estimated_total, 2), "confidence": confidence,
+            "estimated_total_usd_low": round(low, 2), "estimated_total_usd_high": round(high, 2),
+            "confidence": confidence,
             "note": "This is ONE job (batched) — all circuits above share this one floor, not pay it individually.",
         }
     except Exception as e:
