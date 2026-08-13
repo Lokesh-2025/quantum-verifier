@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 from providers.ionq import (
-    ionq_account_check, ionq_compare_devices, ionq_submit_job,
+    ionq_account_check, ionq_compare_devices, ionq_submit_job, ionq_preflight,
     _check_budget_before_submitting, _decompose_large_angle_rzz,
 )
 from core.robustness import find_robust_circuit
@@ -167,3 +167,44 @@ def test_ionq_submit_job_refuses_before_real_hardware_on_budget():
     assert "job_id" not in result
     assert "error" in result
     assert "budget" in result["error"].lower() or "exceeds" in result["error"].lower()
+
+
+# ------------------------------------------------------------- ionq_preflight
+
+def test_preflight_returns_go_for_a_good_cheap_circuit():
+    result = ionq_preflight(
+        qasm_circuits=[BELL_GOOD], target_device="forte-enterprise-1", shots=512,
+        expected_marked_bitstrings=["00", "11"], expected_amplification=2.0,
+    )
+    assert result["overall_verdict"] == "GO"
+    assert result["per_circuit_verdicts"][0]["verdict"] == "GO"
+    assert result["budget_check"]["error"] is None
+
+
+def test_preflight_returns_block_for_an_implausibly_expensive_circuit():
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    for _ in range(2000):
+        qc.rzz(1.3, 0, 1)
+    qc.measure(0, 0)
+    qc.measure(1, 1)
+    from qiskit import qasm2
+    huge_qasm = qasm2.dumps(qc)
+
+    result = ionq_preflight(qasm_circuits=[huge_qasm], target_device="forte-enterprise-1", shots=100)
+    assert result["overall_verdict"] == "BLOCK"
+    assert result["budget_check"]["error"] is not None
+    assert "budget" in result["reasons"][0].lower() or "budget" in str(result["reasons"]).lower()
+
+
+def test_preflight_surfaces_zero_budget_projects():
+    """Whatever the account's real state is, if any project has $0 budget,
+    preflight must surface it -- this is the check that would have caught
+    tonight's wrong-organization mixup before it ever became a problem."""
+    result = ionq_preflight(
+        qasm_circuits=[BELL_GOOD], target_device="forte-enterprise-1", shots=512,
+        expected_marked_bitstrings=["00", "11"], expected_amplification=2.0,
+    )
+    account = ionq_account_check()
+    expected_zero_budget = [p["name"] for p in account["projects"] if p["zero_budget_warning"]]
+    assert result["account_check"]["zero_budget_projects_found"] == expected_zero_budget

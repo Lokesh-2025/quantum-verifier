@@ -633,3 +633,80 @@ def ionq_compare_devices() -> dict:
         return {"devices": devices, "ranked_by": "two_qubit_fidelity_mean (highest first)"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def ionq_preflight(
+    qasm_circuits: list,
+    target_device: str,
+    shots: int = 2048,
+    expected_marked_bitstrings=None,
+    expected_amplification=None,
+    amplification_tolerance: float = 0.5,
+) -> dict:
+    """
+    Runs the full recommended sequence before a real IonQ submission, in
+    one call, instead of requiring 4-5 separate manual calls in the right
+    order: account/budget check, device standing (informational — doesn't
+    block, since you may have a real reason to use a non-top-ranked
+    device), per-circuit safety verification, and a real cost/budget
+    check. Returns one clear overall verdict.
+
+    This does NOT submit anything — pass the same arguments to
+    ionq_submit_job (with confirm_real_hardware=True) once this comes
+    back GO.
+    """
+    from core.verifier import verify as _verify
+
+    if isinstance(qasm_circuits, str):
+        qasm_circuits = [qasm_circuits]
+    n = len(qasm_circuits)
+    resolved_backend = _resolve_ionq_backend(target_device)
+
+    account = ionq_account_check()
+    devices = ionq_compare_devices()
+    device_info = next((d for d in devices.get("devices", []) if d["name"] == resolved_backend), None)
+
+    def _per_circuit(value):
+        if value is None:
+            return [None] * n
+        if n == 1:
+            return [value]
+        return value
+
+    marked_per_circuit = _per_circuit(expected_marked_bitstrings)
+    amp_per_circuit = _per_circuit(expected_amplification)
+
+    verdicts = []
+    for i, qasm in enumerate(qasm_circuits):
+        v = _verify(
+            qasm, provider="ionq", target_device=target_device, shots=shots,
+            expected_marked_bitstrings=marked_per_circuit[i], expected_amplification=amp_per_circuit[i],
+            amplification_tolerance=amplification_tolerance,
+        )
+        verdicts.append({"circuit_index": i, "verdict": v["verdict"], "reason": v.get("reason")})
+
+    from qiskit import QuantumCircuit as QC
+    decomposed = [_decompose_large_angle_rzz(QC.from_qasm_str(qasm)) for qasm in qasm_circuits]
+    budget_check = _check_budget_before_submitting(resolved_backend, decomposed)
+
+    zero_budget_projects = [p["name"] for p in account.get("projects", []) if p.get("zero_budget_warning")]
+    circuits_blocked = [v["circuit_index"] for v in verdicts if v["verdict"] == "BLOCK"]
+
+    overall_go = not circuits_blocked and not budget_check.get("error")
+    reasons = []
+    if circuits_blocked:
+        reasons.append(f"circuit(s) {circuits_blocked} failed verification")
+    if budget_check.get("error"):
+        reasons.append(budget_check["error"])
+
+    return {
+        "overall_verdict": "GO" if overall_go else "BLOCK",
+        "reasons": reasons or ["all checks passed"],
+        "account_check": {"zero_budget_projects_found": zero_budget_projects},
+        "target_device_standing": device_info or {"note": f"'{resolved_backend}' not found in ionq_compare_devices — may be a simulator or unavailable"},
+        "per_circuit_verdicts": verdicts,
+        "budget_check": budget_check,
+        "next_step": ("Call ionq_submit_job with the same arguments plus confirm_real_hardware=True."
+                      if overall_go else
+                      "Fix the reason(s) above before attempting submission."),
+    }

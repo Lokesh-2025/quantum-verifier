@@ -270,6 +270,31 @@ def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> str:
 
 
 @mcp.tool()
+def ionq_preflight(
+    qasm_circuits: list,
+    target_device: str,
+    shots: int = 2048,
+    expected_marked_bitstrings: list = None,
+    expected_amplification=None,
+    amplification_tolerance: float = 0.5,
+) -> str:
+    """
+    Runs the full recommended sequence before a real IonQ submission in
+    ONE call, instead of remembering to call account check, device
+    comparison, verify_experiment, and a budget check separately in the
+    right order: account/budget check, device standing, per-circuit
+    safety verification, and real cost vs. remaining budget. Returns one
+    clear GO/BLOCK verdict. Does not submit anything — pass the same
+    arguments to ionq_submit_job (with confirm_real_hardware=True) once
+    this returns GO.
+    """
+    return json.dumps(ionq.ionq_preflight(
+        qasm_circuits, target_device, shots,
+        expected_marked_bitstrings, expected_amplification, amplification_tolerance,
+    ), indent=2)
+
+
+@mcp.tool()
 def ionq_account_check() -> str:
     """
     Which IonQ project(s)/organization the current API key can actually
