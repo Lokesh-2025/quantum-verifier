@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from core.verifier import verify as _verify
 from core.control_experiment import falsify as _falsify
+from core.robustness import find_robust_circuit as _find_robust_circuit
 import providers.ibm as ibm
 import providers.ionq as ionq
 
@@ -265,6 +266,60 @@ def estimate_ionq_gates(qasm_string: str, backend_name: str = "forte-1", optimiz
 def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> str:
     """Dollar cost preview using IonQ's real per-job pricing floor."""
     return json.dumps(ionq.estimate_ionq_cost(qasm_circuits, shots), indent=2)
+
+
+@mcp.tool()
+def ionq_account_check() -> str:
+    """
+    Which IonQ project(s)/organization the current API key can actually
+    submit to, and their real budget status. Run this before assuming
+    "my API key = my funded organization" — built after this project spent
+    an unknown stretch of time pointed at the wrong, unfunded organization
+    with the real, funded one never even having a key generated for it.
+    """
+    return json.dumps(ionq.ionq_account_check(), indent=2)
+
+
+@mcp.tool()
+def ionq_compare_devices() -> str:
+    """
+    Ranks IonQ's real hardware devices by live calibration data (2-qubit
+    fidelity, coherence time, gate speed) instead of picking one out of
+    habit. IonQ equivalent of the IBM-side compare_devices tool.
+    """
+    return json.dumps(ionq.ionq_compare_devices(), indent=2)
+
+
+@mcp.tool()
+def find_robust_circuit(
+    candidate_qasm_circuits: list,
+    provider: str,
+    target_device: str,
+    marked_bitstrings: list,
+    shots: int = 2048,
+    n_scoring_runs: int = 2,
+    variance_penalty: float = 1.0,
+) -> str:
+    """
+    Given several candidate circuits for the same problem (e.g. the same
+    circuit with different tunable parameters), picks the one that's most
+    robust to REAL target-device noise — not just whichever scores highest
+    in a perfect, noiseless simulation. Scores each candidate across
+    multiple independent real-noise runs (mean minus a penalty for
+    inconsistency between runs), then validates the winner on one more
+    fresh run it wasn't scored on.
+
+    Use this whenever choosing between parameter settings for the same
+    circuit — picking by ideal/noiseless score alone can select a fragile
+    point that looks great on paper and falls apart on real hardware
+    (this happened for real in this project: a circuit tuned for best
+    noiseless performance was ~2.5x weaker on real hardware than a
+    lower-scoring-on-paper alternative found this way).
+    """
+    return json.dumps(_find_robust_circuit(
+        candidate_qasm_circuits, provider, target_device, marked_bitstrings,
+        shots, n_scoring_runs, variance_penalty,
+    ), indent=2)
 
 
 if __name__ == "__main__":

@@ -115,6 +115,56 @@ def ionq_devices() -> dict | list:
         return {"error": str(e)}
 
 
+_JOB_FLOOR_USD = 168.20
+_KNOWN_ABOVE_FLOOR_POINT_2Q_GATES = 600
+_KNOWN_ABOVE_FLOOR_POINT_USD = 3294.87
+_ROUGH_USD_PER_2Q_GATE = (_KNOWN_ABOVE_FLOOR_POINT_USD - _JOB_FLOOR_USD) / _KNOWN_ABOVE_FLOOR_POINT_2Q_GATES
+
+
+def _estimate_cost_from_circuits(decomposed_circuits: list) -> float:
+    """Same cost model as estimate_ionq_cost, applied to already-decomposed
+    circuits (so it reflects the real gate count that will actually run)."""
+    max_two_qubit_gates = max(
+        (sum(1 for instr in qc.data if instr.operation.name == "rzz") for qc in decomposed_circuits),
+        default=0,
+    )
+    if max_two_qubit_gates <= 20:
+        return _JOB_FLOOR_USD
+    return _JOB_FLOOR_USD + _ROUGH_USD_PER_2Q_GATE * max_two_qubit_gates
+
+
+def _check_budget_before_submitting(resolved_backend: str, decomposed_circuits: list) -> dict:
+    """
+    Refuses submission with a clear reason if the estimated cost exceeds
+    the actual remaining budget of the project this backend belongs to --
+    built specifically because this project twice hit a real, opaque
+    QuotaExhaustedError from IonQ's API after already passing every other
+    check, once from an unnoticed $0 project budget and once from an
+    under-estimated real cost. Catches both classes here instead.
+    """
+    estimated_cost = _estimate_cost_from_circuits(decomposed_circuits)
+    account = ionq_account_check()
+    if account.get("error"):
+        return {"error": None}  # can't check -- don't block submission on this failing, just skip the check
+    matching = [p for p in account["projects"] if resolved_backend in (p.get("allowed_targets") or [])]
+    if not matching:
+        return {"error": None}  # no project info to check against -- let IonQ's own API be the final word
+    project = matching[0]
+    remaining = project["budget_remaining_usd"]
+    if estimated_cost > remaining:
+        return {
+            "error": f"Estimated cost (~${estimated_cost:.2f}, rough) exceeds remaining budget "
+                     f"(${remaining:.2f}) on project '{project['name']}'.",
+            "hint": "Raise the project's budget in the IonQ dashboard, or reduce circuit "
+                    "complexity (large-angle rzz gates get split into multiple native gates, "
+                    "which is often the real cost driver), then resubmit.",
+            "estimated_cost_usd": round(estimated_cost, 2),
+            "budget_remaining_usd": remaining,
+            "project": project["name"],
+        }
+    return {"error": None}
+
+
 def ionq_submit_job(
     backend_name: str,
     qasm_circuits: list,
@@ -237,6 +287,11 @@ def ionq_submit_job(
                 "hint": "Pass confirm_real_hardware=True to actually submit.",
                 "self_check": self_check,
             }
+
+        if is_hardware:
+            budget_check = _check_budget_before_submitting(resolved_backend, circuits)
+            if budget_check.get("error"):
+                return {**budget_check, "self_check": self_check}
 
         t_circuits = [transpile(qc, backend=target_backend, optimization_level=optimization_level) for qc in circuits]
         job = target_backend.run(t_circuits, shots=shots)
@@ -376,5 +431,100 @@ def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> dict:
             "estimated_total_usd": round(estimated_total, 2), "confidence": confidence,
             "note": "This is ONE job (batched) — all circuits above share this one floor, not pay it individually.",
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def ionq_account_check() -> dict:
+    """
+    Surfaces which IonQ project(s)/organization this API key can actually
+    submit to, and their real budget status -- built specifically because
+    this project once spent a long, unknown stretch of time pointed at the
+    wrong (unfunded) IonQ organization, with the real, funded one sitting
+    untouched and never even having an API key generated for it. Nothing
+    in the submission path would have caught that on its own; this makes
+    it visible up front instead of requiring a manual dashboard dig.
+
+    Flags any accessible project with zero remaining budget explicitly --
+    that's exactly the shape of the mixup that motivated this tool.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return {"error": "IONQ_API_KEY not set in .env"}
+    try:
+        resp = requests.get(
+            "https://api.ionq.co/v0.3/projects",
+            headers={"Authorization": f"apiKey {api_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        projects = resp.json().get("projects", [])
+        result = []
+        for p in projects:
+            limit = p.get("quotaLimit", 0)
+            usage = p.get("quotaUsage", 0)
+            remaining = limit - usage
+            result.append({
+                "project_id": p.get("id"), "name": p.get("name"),
+                "budget_limit_usd": limit, "budget_used_usd": round(usage, 2),
+                "budget_remaining_usd": round(remaining, 2),
+                "allowed_targets": p.get("allowedTargets"),
+                "last_job_run_time": p.get("lastJobRunTime"),
+                "zero_budget_warning": limit == 0,
+            })
+        zero_budget = [p["name"] for p in result if p["zero_budget_warning"]]
+        return {
+            "projects": result,
+            "note": (f"WARNING: {len(zero_budget)} accessible project(s) have $0 budget "
+                     f"configured: {zero_budget} -- if you expected to be submitting real "
+                     "jobs against one of these, check you're using the right API key/project."
+                     if zero_budget else
+                     "All accessible projects have a nonzero budget configured."),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def ionq_compare_devices() -> dict:
+    """
+    Ranks IonQ's real hardware devices by actual live calibration data --
+    2-qubit gate fidelity, coherence time, gate speed, readout fidelity --
+    instead of picking one out of habit or because it was mentioned first
+    in an old doc. Mirrors the IBM-side compare_devices tool, which IonQ
+    never had an equivalent for.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return {"error": "IONQ_API_KEY not set in .env"}
+    try:
+        headers = {"Authorization": f"apiKey {api_key}"}
+        resp = requests.get("https://api.ionq.co/v0.3/backends", headers=headers, timeout=15)
+        resp.raise_for_status()
+        backends = resp.json()
+        devices = []
+        for b in backends:
+            name = b.get("backend", "")
+            if "simulator" in name.lower() or b.get("status") != "available":
+                continue
+            char_url = b.get("characterization_url")
+            if not char_url:
+                continue
+            char_resp = requests.get(f"https://api.ionq.co/v0.3{char_url}", headers=headers, timeout=15)
+            char = char_resp.json() if char_resp.status_code == 200 else {}
+            fidelity = char.get("fidelity", {})
+            timing = char.get("timing", {})
+            devices.append({
+                "name": name, "location": b.get("location"),
+                "qubits": b.get("qubits"), "queue_time_minutes": b.get("average_queue_time"),
+                "two_qubit_fidelity_mean": fidelity.get("2q", {}).get("mean"),
+                "one_qubit_fidelity_mean": fidelity.get("1q", {}).get("mean"),
+                "spam_fidelity_mean": fidelity.get("spam", {}).get("mean"),
+                "t1_seconds": timing.get("t1"), "t2_seconds": timing.get("t2"),
+                "two_qubit_gate_seconds": timing.get("2q"),
+            })
+        devices.sort(key=lambda d: (d.get("two_qubit_fidelity_mean") or 0), reverse=True)
+        for rank, d in enumerate(devices, 1):
+            d["rank_by_two_qubit_fidelity"] = rank
+        return {"devices": devices, "ranked_by": "two_qubit_fidelity_mean (highest first)"}
     except Exception as e:
         return {"error": str(e)}
