@@ -316,6 +316,7 @@ def estimate_ionq_gates(qasm_string: str, backend_name: str = "forte-1", optimiz
         from qiskit_ionq import IonQProvider
         resolved_backend = _resolve_ionq_backend(backend_name)
         backend = IonQProvider(api_key).get_backend(resolved_backend, gateset="native")
+        circuit = _decompose_large_angle_rzz(circuit)
         t_circuit = transpile(circuit, backend=backend, optimization_level=optimization_level)
         ops = dict(t_circuit.count_ops())
         two_qubit_gates = ops.get("zz", 0) + ops.get("ms", 0)
@@ -352,7 +353,7 @@ def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> dict:
         per_circuit = []
         max_two_qubit_gates = 0
         for i, qasm_string in enumerate(qasm_circuits):
-            circuit = QC.from_qasm_str(qasm_string)
+            circuit = _decompose_large_angle_rzz(QC.from_qasm_str(qasm_string))
             t_circuit = transpile(circuit, backend=backend, optimization_level=1)
             ops = dict(t_circuit.count_ops())
             two_q = ops.get("zz", 0)
