@@ -441,6 +441,9 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
         backend = service.backend(device_name)
     except Exception as e:
         return {"error": f"Device '{device_name}' not found: {e}"}
+    quota_check = _check_ibm_quota_before_submitting(device_name, circuit, shots)
+    if quota_check.get("error"):
+        return quota_check
     pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
     isa_circuit = pm.run(circuit)
     sampler = Sampler(mode=backend)
@@ -837,3 +840,64 @@ def job_analytics() -> dict:
         return {"total_jobs_logged": total_jobs, "by_tool": by_tool}
     except Exception as e:
         return {"error": str(e)}
+
+
+def ibm_account_check() -> dict:
+    """
+    Which IBM Quantum instance(s) this account can access and real usage
+    quota status. IonQ's equivalent (ionq_account_check) reports a dollar
+    budget; IBM's real model is genuinely different, not just re-labeled —
+    checked directly against the live API rather than assumed: the free
+    "open" plan is a TIME quota (seconds of QPU access over a rolling
+    period), not a dollar amount. Built to match what IBM's API actually
+    exposes, not to force IonQ's shape onto it.
+    """
+    try:
+        service = _get_service()
+        instances = service.instances()
+        usage = service.usage()
+        remaining = usage.get("usage_remaining_seconds")
+        return {
+            "instances": instances,
+            "usage": {
+                "seconds_used": usage.get("usage_consumed_seconds"),
+                "seconds_limit": usage.get("usage_limit_seconds"),
+                "seconds_remaining": remaining,
+                "limit_reached": usage.get("usage_limit_reached"),
+                "period": usage.get("usage_period"),
+            },
+            "zero_quota_warning": bool(remaining is not None and remaining <= 0),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _check_ibm_quota_before_submitting(backend_name: str, circuit, shots: int) -> dict:
+    """
+    Refuses submission with a clear reason if a circuit's estimated
+    runtime exceeds the account's actual remaining time quota — the IBM
+    equivalent of the IonQ dollar-budget preflight check, built after
+    IonQ's version caught two real failures this project hit. Uses
+    estimate_runtime's own estimate, converted from minutes to seconds to
+    match IBM's real quota unit.
+    """
+    try:
+        service = _get_service()
+        backend = service.backend(backend_name)
+        est = _estimate_minutes(backend, circuit, shots)
+        estimated_seconds = est.get("total_estimate_mins", 0) * 60
+        account = ibm_account_check()
+        if "error" in account:
+            return {"error": None}  # can't check -- don't block on this failing
+        remaining = account["usage"]["seconds_remaining"]
+        if remaining is not None and estimated_seconds > remaining:
+            return {
+                "error": f"Estimated runtime (~{estimated_seconds:.0f}s) exceeds remaining "
+                         f"quota ({remaining}s) on the free/open plan.",
+                "hint": "Wait for the quota period to reset, or use a different instance "
+                        "if you have paid access, then resubmit.",
+                "estimated_seconds": round(estimated_seconds, 1), "seconds_remaining": remaining,
+            }
+        return {"error": None}
+    except Exception:
+        return {"error": None}  # can't check -- don't block submission on this failing

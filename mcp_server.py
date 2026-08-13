@@ -270,6 +270,17 @@ def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> str:
 
 
 @mcp.tool()
+def ibm_account_check() -> str:
+    """
+    Which IBM Quantum instance(s) this account can access and real usage
+    quota status (seconds of QPU time on the free plan — a genuinely
+    different model from IonQ's dollar budgets, checked directly against
+    IBM's API rather than assumed).
+    """
+    return json.dumps(ibm.ibm_account_check(), indent=2)
+
+
+@mcp.tool()
 def ionq_preflight(
     qasm_circuits: list,
     target_device: str,
