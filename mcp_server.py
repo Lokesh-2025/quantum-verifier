@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from core.verifier import verify as _verify
 from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
+from core.memory import memory_summary as _memory_summary
 import providers.ibm as ibm
 import providers.ionq as ionq
 
@@ -320,6 +321,33 @@ def find_robust_circuit(
         candidate_qasm_circuits, provider, target_device, marked_bitstrings,
         shots, n_scoring_runs, variance_penalty,
     ), indent=2)
+
+
+# --------------------------------------------------------------------------
+# Experiment Memory — prediction-vs-reality tracking
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def ionq_sync_memory_for_job(job_id: str) -> str:
+    """
+    Completes Experiment Memory for a real IonQ job once it's actually
+    finished: fetches its real results and records the real amplification
+    against the prediction ionq_submit_job made automatically at
+    submission time. Call this after a job you submitted through
+    ionq_submit_job has completed.
+    """
+    return json.dumps(ionq.ionq_sync_memory_for_job(job_id), indent=2)
+
+
+@mcp.tool()
+def memory_summary(provider: str = None) -> str:
+    """
+    How trustworthy has this tool's predictions actually been, broken
+    down by provider and target device — computed from real recorded
+    prediction-vs-reality pairs, not a guess. Small sample sizes should
+    be read with real caution.
+    """
+    return json.dumps(_memory_summary(provider), indent=2)
 
 
 if __name__ == "__main__":

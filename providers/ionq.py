@@ -270,6 +270,15 @@ def ionq_submit_job(
                     entry["within_tolerance"] = lo <= sim_amp <= hi
                     if not entry["within_tolerance"]:
                         self_check["passed"] = False
+                if is_hardware:
+                    from qiskit import qasm2
+                    from core.memory import record_prediction
+                    pred = record_prediction(
+                        qasm2.dumps(qc), provider="ionq", target_device=resolved_backend,
+                        predicted_amplification=sim_amp, marked_bitstrings=circuit_marked,
+                        source="ionq_submit_job_self_check", circuit_index_in_job=i,
+                    )
+                    entry["memory_prediction_id"] = pred.get("prediction_id")
             self_check["per_circuit"].append(entry)
 
         if not self_check["passed"]:
@@ -302,8 +311,16 @@ def ionq_submit_job(
 
         t_circuits = [transpile(qc, backend=target_backend, optimization_level=optimization_level) for qc in circuits]
         job = target_backend.run(t_circuits, shots=shots)
+        job_id = job.job_id()
+
+        from core.memory import attach_job_id
+        for entry in self_check["per_circuit"]:
+            pred_id = entry.get("memory_prediction_id")
+            if pred_id:
+                attach_job_id(pred_id, job_id)
+
         return {
-            "job_id": job.job_id(), "status": "SUBMITTED", "backend": resolved_backend,
+            "job_id": job_id, "status": "SUBMITTED", "backend": resolved_backend,
             "is_real_hardware": True, "num_circuits": len(circuits), "shots": shots,
             "provider": "IonQ", "self_check": self_check,
         }
@@ -327,6 +344,69 @@ def ionq_job_status(job_id: str, backend_name: str = "ionq_simulator") -> dict:
             "job_id": job_id, "status": str(status.name), "backend": resolved_backend,
             "is_real_hardware": _ionq_is_hardware(resolved_backend), "provider": "IonQ",
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def ionq_sync_memory_for_job(job_id: str) -> dict:
+    """
+    Completes Experiment Memory for a real job: fetches its actual results
+    directly via IonQ's REST API (not the SDK's job.result().get_counts()
+    path, which has a known bug on batched real-hardware jobs — it tries
+    to parse a child job's UUID as an integer and throws), computes the
+    real observed amplification for each circuit using the marked
+    bitstrings recorded at submission time, and records it against the
+    matching prediction.
+
+    Call this once a job submitted through ionq_submit_job has actually
+    completed — nothing calls this automatically yet, since polling for
+    job completion is a separate concern from submission.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return {"error": "IONQ_API_KEY not set in .env"}
+    try:
+        from core.memory import find_predictions_for_job, record_real_result
+
+        predictions = find_predictions_for_job(job_id)
+        if not predictions:
+            return {"error": f"No predictions in memory are linked to job {job_id}."}
+
+        headers = {"Authorization": f"apiKey {api_key}"}
+        resp = requests.get(f"https://api.ionq.co/v0.3/jobs/{job_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        job_data = resp.json()
+        children = job_data.get("children") or [job_id]  # single-circuit jobs have no children
+
+        results = []
+        for pred in predictions:
+            idx = pred["circuit_index_in_job"] or 0
+            if idx >= len(children):
+                results.append({"prediction_id": pred["prediction_id"], "error": "circuit index out of range for this job's children"})
+                continue
+            child_id = children[idx]
+            hist_resp = requests.get(
+                f"https://api.ionq.co/v0.4/jobs/{child_id}/results/histogram", headers=headers, timeout=15
+            )
+            if hist_resp.status_code != 200:
+                results.append({"prediction_id": pred["prediction_id"], "error": f"could not fetch results for child {child_id} (status {hist_resp.status_code}, job may not be complete)"})
+                continue
+            hist = {int(k): v for k, v in hist_resp.json().items()}
+            total = sum(hist.values())
+            marked_bitstrings = pred["marked_bitstrings"] or []
+            marked_decimal = {int(b, 2) for b in marked_bitstrings}
+            n_qubits = len(marked_bitstrings[0]) if marked_bitstrings else None
+            marked_shots = sum(v for k, v in hist.items() if k in marked_decimal)
+            baseline = len(marked_decimal) / (2 ** n_qubits) if n_qubits and total else None
+            real_amp = (marked_shots / total) / baseline if baseline else None
+
+            record_real_result(pred["prediction_id"], real_amp, real_job_id=job_id)
+            results.append({
+                "prediction_id": pred["prediction_id"], "circuit_index": idx,
+                "predicted_amplification": pred["predicted_amplification"],
+                "real_amplification": round(real_amp, 3) if real_amp is not None else None,
+            })
+        return {"job_id": job_id, "synced": results}
     except Exception as e:
         return {"error": str(e)}
 
