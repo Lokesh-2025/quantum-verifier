@@ -12,8 +12,56 @@ device's native gateset, simulate with the matching noise model, refuse on
 mismatch — one bad circuit refuses the WHOLE batch) is the closest existing
 precedent to this project's core Verifier and is preserved verbatim.
 """
+import math
 import os
 import requests
+
+from qiskit.circuit import Parameter
+from qiskit.circuit.library import RZZGate
+from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary as _sel
+
+# Same fix as core/verifier.py's _register_ionq_native_equivalences, duplicated
+# here (not imported) so this module is correct on its own regardless of what
+# else got imported first -- the exact class of mistake that let an
+# unfixed submission go out: RZZ(theta) [radians] == native ZZ(theta/(2*pi))
+# [turns] exactly (verified via Operator comparison), but qiskit's transpiler
+# has no built-in equivalence between them and silently falls back to
+# expensive, inflated general two-qubit synthesis without this registered.
+def _register_ionq_native_equivalences():
+    try:
+        from qiskit_ionq.ionq_gates import ZZGate as _IonQZZGate
+    except ImportError:
+        return
+    theta = Parameter("theta")
+    equiv = __import__("qiskit").QuantumCircuit(2)
+    equiv.append(_IonQZZGate(theta / (2 * math.pi)), [0, 1])
+    _sel.add_equivalence(RZZGate(theta), equiv)
+
+
+_register_ionq_native_equivalences()
+
+# IonQ's native ZZ gate is only valid for |theta_turns| <= 0.25 (a quarter
+# turn) -- confirmed via a real IonQ API rejection when a large-angle rzz hit
+# the 1:1 equivalence above. Splitting into N chained smaller RZZ
+# applications is mathematically EXACT: ZZ generators on the same qubit pair
+# commute, so N reps of RZZ(theta/N) = RZZ(theta) exactly. Duplicated here
+# (not imported from core.verifier) so this module is correct standalone.
+IONQ_NATIVE_ZZ_MAX_TURNS = 0.25
+
+
+def _decompose_large_angle_rzz(circuit):
+    new_qc = circuit.copy_empty_like()
+    for instruction in circuit.data:
+        if instruction.operation.name == "rzz":
+            theta = float(instruction.operation.params[0])
+            theta_turns = theta / (2 * math.pi)
+            n_chunks = max(1, math.ceil(abs(theta_turns) / IONQ_NATIVE_ZZ_MAX_TURNS))
+            for _ in range(n_chunks):
+                new_qc.rzz(theta / n_chunks, instruction.qubits[0], instruction.qubits[1])
+        else:
+            new_qc.append(instruction.operation, instruction.qubits, instruction.clbits)
+    return new_qc
+
 
 _IONQ_BACKEND_ALIASES = {
     "simulator":              "ionq_simulator",
@@ -103,9 +151,10 @@ def ionq_submit_job(
         circuits = []
         for i, qasm_string in enumerate(qasm_circuits):
             try:
-                circuits.append(QC.from_qasm_str(qasm_string))
+                parsed = QC.from_qasm_str(qasm_string)
             except Exception as parse_err:
                 return {"error": f"Failed to parse circuit {i}: {parse_err}"}
+            circuits.append(_decompose_large_angle_rzz(parsed))
 
         resolved_backend = _resolve_ionq_backend(backend_name)
         is_hardware = _ionq_is_hardware(resolved_backend)
