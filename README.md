@@ -20,26 +20,26 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 graph TD
     Circuit["AI-generated circuit"]
 
-    subgraph "Verifier pipeline (core/)"
+    subgraph Verifier["Verifier pipeline core/"]
         Semantic["Semantic check"]
         Topology["Topology check"]
         Ideal["Ideal simulation"]
-        HW["Hardware-aware simulation\n(real noise model)"]
+        HW["Hardware-aware simulation<br/>real noise model"]
         GateSynth["Gate synthesis check"]
         Ground["Ground-truth check"]
-        Control["Control experiment\n(falsify_claim)"]
-        Robust["Robustness selection\n(find_robust_circuit)"]
+        Control["Control experiment<br/>falsify_claim"]
+        Robust["Robustness selection<br/>find_robust_circuit"]
     end
 
-    subgraph "Preflight (providers/)"
+    subgraph Preflight["Preflight providers/"]
         Account["Account / budget check"]
         Devices["Device comparison"]
         Cost["Real cost estimate"]
     end
 
-    subgraph "Learning (core/memory.py, intelligence.py)"
-        Mem[("Experiment Memory\nprediction vs. reality")]
-        Intel["Intelligence\nrecommend_tolerance"]
+    subgraph Learning["Learning core/memory.py intelligence.py"]
+        Mem[("Experiment Memory<br/>prediction vs. reality")]
+        Intel["Intelligence<br/>recommend_tolerance"]
     end
 
     Circuit --> Semantic --> Topology --> Ideal --> HW --> GateSynth --> Ground
@@ -47,7 +47,7 @@ graph TD
     HW --> Robust
     Account --> Cost
     Devices --> Cost
-    Ground --> Verdict{"GO / BLOCK"}
+    Ground --> Verdict{"GO or BLOCK"}
     Cost --> Verdict
     Verdict -->|GO| Hardware["Real hardware"]
     Hardware --> Mem
