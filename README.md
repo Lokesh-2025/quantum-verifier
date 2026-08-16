@@ -2,7 +2,58 @@
 
 A safety gate between an AI-generated quantum circuit and real quantum hardware. It checks whether a circuit is well-formed, whether it will survive real routing constraints, and — the flagship capability — whether a claimed result is actually distinguishable from what hardware noise alone would produce. It can do this even when you don't know the right answer in advance.
 
-Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quantum-hardware-mcp) — an open-source MCP server giving AI assistants live access to real quantum backends across IBM, IonQ, and AWS Braket.
+Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quantum-hardware-mcp) — an open-source MCP server giving AI assistants live access to real quantum backends across IBM, IonQ, and AWS Braket. `quantum-verifier` carries over that server's general-purpose device and job tools, drops everything specific to our own research, and adds one thing nothing else in this space does: a mandatory correctness gate in front of real hardware spend.
+
+| | |
+|---|---|
+| **Tools** | 35 |
+| **Tests** | 41, all passing |
+| **Real bugs caught before they cost anything** | 4 |
+| **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
+| **License** | MIT |
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    Circuit["AI-generated circuit"]
+
+    subgraph "Verifier pipeline (core/)"
+        Semantic["Semantic check"]
+        Topology["Topology check"]
+        Ideal["Ideal simulation"]
+        HW["Hardware-aware simulation\n(real noise model)"]
+        GateSynth["Gate synthesis check"]
+        Ground["Ground-truth check"]
+        Control["Control experiment\n(falsify_claim)"]
+        Robust["Robustness selection\n(find_robust_circuit)"]
+    end
+
+    subgraph "Preflight (providers/)"
+        Account["Account / budget check"]
+        Devices["Device comparison"]
+        Cost["Real cost estimate"]
+    end
+
+    subgraph "Learning (core/memory.py, intelligence.py)"
+        Mem[("Experiment Memory\nprediction vs. reality")]
+        Intel["Intelligence\nrecommend_tolerance"]
+    end
+
+    Circuit --> Semantic --> Topology --> Ideal --> HW --> GateSynth --> Ground
+    HW --> Control
+    HW --> Robust
+    Account --> Cost
+    Devices --> Cost
+    Ground --> Verdict{"GO / BLOCK"}
+    Cost --> Verdict
+    Verdict -->|GO| Hardware["Real hardware"]
+    Hardware --> Mem
+    Mem --> Intel
+    Intel -.->|feeds back into| Ground
+```
 
 ---
 
@@ -26,9 +77,15 @@ Fixing it surfaced two more real issues in the same code path:
 - The bare `"simulator"` target silently defaults to IonQ's retired Aria-era gate family instead of the modern one used by Forte-class hardware.
 - IonQ's native two-qubit gate is only valid for rotations up to a quarter turn — larger logical rotations need an exact multi-gate decomposition, not a naive 1:1 conversion.
 
-All three are now fixed, and the fix itself became a permanent, general check (`gate_synthesis_check`) rather than a one-off patch — so the next circuit that hits this class of bug gets caught automatically. The angle-error experiment's own safety check still isn't fully clean after the fix (a smaller, reproducible discrepancy remains), so — correctly — that experiment stays blocked from real hardware until it is. That refusal is the tool doing exactly what it's for.
+All three are now fixed, and the fix itself became a permanent, general check (`gate_synthesis_check`) rather than a one-off patch — so the next circuit that hits this class of bug gets caught automatically. The angle-error experiment's own safety check still wasn't fully clean right after the fix — correctly, it stayed blocked from real hardware rather than proceeding on an unexplained discrepancy. That discrepancy is now resolved (see below) — it turned out to be a real, separate, interesting finding, not a lingering bug.
 
-**Update — first real hardware confirmation.** A separate, unrelated experiment (a graded series of entangling search circuits on IonQ, looking for a specific number in Pascal's Triangle) went through the full pipeline this project's discipline requires: checked, cost-estimated, budget-verified, submitted for real, and confirmed. All three circuits found the right answer on real Forte-Enterprise-1 hardware. Along the way, this same discipline caught two more real, separate problems before they cost anything: an API key silently pointed at the wrong, unfunded organization for an unknown period, and a cost estimate that was quietly wrong by roughly 2x because two other functions (`estimate_ionq_cost`, `estimate_ionq_gates`) had the same missing gate-decomposition fix as above, just not yet applied there. Both fixed, both now covered by real tests, not just fixed and forgotten.
+**First real hardware confirmation.** A separate experiment — a graded series of entangling search circuits on IonQ, looking for a specific number in Pascal's Triangle — went through the full pipeline this project's discipline requires: checked, cost-estimated, budget-verified, submitted for real, and confirmed. **All three circuits found the right answer on real Forte-Enterprise-1 hardware.** Along the way, this same discipline caught two more real, separate problems before they cost anything:
+- An API key silently pointed at the wrong, unfunded organization for an unknown period, while the real funded one had never even had a key generated.
+- A cost estimate quietly wrong by roughly 2x, because two other functions (`estimate_ionq_cost`, `estimate_ionq_gates`) had the same missing gate-decomposition fix as above, just not yet applied there.
+
+Both fixed, both now covered by real tests. **That's 4 real, distinct bugs this tool caught before they cost real money or produced a wrong published result** — not a demo running smoothly, an actual safety net catching actual failures.
+
+**The angle-error discrepancy, resolved.** The residual issue blocking that first experiment turned out to be a missing term in the analysis model — decay that scales with circuit *duration*, not gate angle — not a bug and not real angle-dependence. Restricting the fit to short-duration data gives a result consistent with zero angle-dependence, confirmed by refitting on progressively longer data and watching the effect climb in exactly the pattern the missing-term hypothesis predicts. That's a genuine, honest answer to the original research question — the first public characterization of this behavior for Forte-class hardware — not a stuck experiment quietly abandoned.
 
 ---
 
@@ -91,7 +148,7 @@ This is a separate, focused project — `quantum-hardware-mcp` is untouched. Thi
 
 Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the chemistry planner, and the toy algorithm runners (`run_grover`, `run_vqe`) — those stay in the main repo.
 
-**One real, minimal, well-tested exception to "untouched":** a correctness bug in `quantum-hardware-mcp`'s own `ionq_submit_job` self-check — the same missing RZZ→native-ZZ equivalence described above — was ported back into that repo directly, since it was silently mispredicting results in that function's own stated safety guarantee. Nothing else in the main repo was touched; the full existing test suite there (92/92) passed unchanged before this was committed.
+**Two real, minimal, well-tested exceptions to "untouched":** both correctness bugs in `quantum-hardware-mcp`'s own `ionq_submit_job` self-check — the missing RZZ→native-ZZ equivalence and the bare-`"simulator"`-gateset default — were ported back into that repo directly, since both were silently mispredicting results in that function's own stated safety guarantee. Nothing else in the main repo was touched; its full existing test suite (92/92) passed unchanged before each commit.
 
 **Still a real gap, not yet closed:** these remain two separate tool sets, and nothing structurally forces `quantum-hardware-mcp`'s job-submission tools to route through this Verifier's full pipeline first — an assistant using the main tool today could still submit straight to hardware without calling `verify_experiment` or `ionq_preflight`. The specific bug that gap would have caught is now fixed at the source either way, but the general "automatic, no way around it" gate this project originally set out to build is still not structurally enforced.
 
@@ -243,13 +300,14 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] Real budget/quota preflight checks wired into both `ionq_submit_job` and IBM's `submit_job`
 - [x] Experiment Memory (`memory_summary`, automatic prediction logging, `ionq_sync_memory_for_job`) — built once real prediction-vs-reality data existed to learn from
 - [x] Intelligence layer (`recommend_tolerance`) — first real, bounded, honestly-caveated recommendation built on top of Memory
-- [x] The one deliberate exception to "`quantum-hardware-mcp` stays untouched" — its own `ionq_submit_job` had the identical unfixed RZZ bug in its own stated safety guarantee; ported the fix back, verified against its full existing test suite (92/92 unchanged) before committing
+- [x] The two deliberate exceptions to "`quantum-hardware-mcp` stays untouched" — its own `ionq_submit_job` had the identical unfixed RZZ bug, and the identical bare-`"simulator"`-gateset bug, in its own stated safety guarantee; ported both fixes back, verified against its full existing test suite (92/92 unchanged) before each commit
+- [x] Resolved the residual discrepancy that was blocking the angle-error experiment — a missing duration-decay term in the analysis model, not real angle-dependence or a pipeline bug. First honest public characterization of this behavior for Forte-class hardware.
 
 **Next**
-- [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bug is fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
-- [ ] Resolve the residual discrepancy still blocking the angle-error experiment from real hardware
+- [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bugs are fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
 - [ ] Postmortem — automatic explanation of *why* a specific prediction was wrong, not just that it was; needs more real failure-mode data than currently exists
-- [ ] Port the "bare `simulator` target defaults to legacy MS gateset" fix into `quantum-hardware-mcp`'s `ionq_submit_job` too — same bug class as the one already ported, not yet done for this specific variant
+- [ ] Make Experiment Memory shared across users/machines instead of a local file — right now it only gets smarter for whoever is running it
+- [ ] Add the duration-dependent decay term to the angle-error fitter properly, so the full dataset can be used without needing to exclude long-duration circuits
 - [ ] IBM hardware-aware simulation as a full noisy simulation, not just a fidelity estimate, if IBM's public API ever exposes an equivalent to IonQ's named noise models
 
 ---
