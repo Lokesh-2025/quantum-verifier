@@ -275,13 +275,22 @@ def test_ionq_e1_ring_gate_synthesis_check_passes_after_the_fix():
     isn't the right target for Forte-class hardware anyway) -- noted, not
     fixed here, since it's a different bug than the one this check targets.
     Execution still stays on the free simulator either way; only the
-    transpile TARGET and applied noise model change with target_device."""
+    transpile TARGET and applied noise model change with target_device.
+
+    E1_RING's own rzz angles (up to 0.89 turns) exceed IonQ's native ZZ
+    gate's 0.25-turn valid range, so _decompose_large_angle_rzz correctly
+    splits the 10 logical rzz into 36 native-range chunks BEFORE transpile
+    -- an exact, not lossy, split (same commuting-generator identity the
+    angle-error experiment's own protocol relies on). That's why the count
+    is 36, not 10: what actually proves the fix is that logical and
+    transpiled counts still match 1:1 post-decomposition (no synthesis
+    inflation), which gate_synthesis_check's passed=True already confirms."""
     result = v.verify(E1_RING, provider="ionq", target_device="forte-1", shots=256,
                        expected_marked_bitstrings=TARGET_BITSTRINGS, expected_amplification=21.5,
                        amplification_tolerance=0.6)
     gsc = result["hardware_aware_simulation"]["gate_synthesis_check"]
     assert gsc["passed"] is True, gsc
-    assert gsc["logical_two_qubit_gates"] == gsc["transpiled_two_qubit_gates"] == 10
+    assert gsc["logical_two_qubit_gates"] == gsc["transpiled_two_qubit_gates"] == 36
 
 
 # ------------------------------------------------------------- ground-truth checks

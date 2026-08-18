@@ -126,6 +126,12 @@ circuit + target device + (optional) expected result
 
 Plus the general-purpose device-intelligence, job-lifecycle, account/budget visibility (`ionq_account_check`, `ibm_account_check`), and IonQ pre-flight tooling, carried over from and extended beyond `quantum-hardware-mcp`.
 
+**Checkable-structure experiment templates** (`core/templates.py`) — the only honest way to verify a result once a circuit is too big to classically simulate (roughly 50+ qubits) is to only run problems whose correct answer is cheap to check, even though finding it was hard — the same principle `equality_oracle_search` already uses for Pascal's-triangle collisions. Two generators so far, each paired with its own lightweight classical verifier:
+- `ghz_parity_check_circuit` / `verify_ghz_parity` — a GHZ state's only valid outcomes are all-0 or all-1, so this stays checkable at *any* qubit count with zero simulation, giving a real fidelity lower bound.
+- `graph_coloring_oracle_circuit` / `verify_graph_coloring` — an LNAA-style oracle (same RZZ-phase-kick + RX-mixing structure as `equality_oracle_search`) that amplifies valid 2-colorings of a graph; checking a candidate is O(edges) even though the search space is exponential.
+
+Currently a `core/` library, not yet wired into `mcp_server.py` as callable tools — see Roadmap.
+
 ---
 
 ## How it works
@@ -217,7 +223,8 @@ quantum-verifier/
 │   ├── control_experiment.py  # auto-generated control circuits
 │   ├── robustness.py          # find_robust_circuit — real-noise-aware selection
 │   ├── memory.py               # Experiment Memory — prediction-vs-reality tracking
-│   └── intelligence.py        # recommend_tolerance — data-driven, on top of memory
+│   ├── intelligence.py        # recommend_tolerance — data-driven, on top of memory
+│   └── templates.py           # checkable-structure experiment generators (GHZ, graph coloring)
 ├── providers/
 │   ├── ibm.py                 # device intelligence, job lifecycle, account/quota check
 │   └── ionq.py                # device listing, batched self-checked submission,
@@ -231,7 +238,8 @@ quantum-verifier/
 │   ├── test_side_by_side_old_repo.py  # confirms copied tools match the originals
 │   ├── test_ionq_tooling.py         # account/device/robustness/budget checks
 │   ├── test_ibm_tooling.py          # IBM account/quota check
-│   └── test_intelligence.py         # recommend_tolerance
+│   ├── test_intelligence.py         # recommend_tolerance
+│   └── test_templates.py            # checkable-structure experiment generators
 ├── experiment_memory.db        # local SQLite store, gitignored — Experiment Memory's data
 └── requirements.txt
 ```
@@ -244,7 +252,7 @@ quantum-verifier/
 pytest tests/
 ```
 
-41 tests across 6 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), and `recommend_tolerance` correctly recovering a controlled, known error rate. All simulator-only or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above).
+49 tests across 7 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, and the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates. All simulator-only or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above).
 
 `test_side_by_side_old_repo.py` needs `quantum-hardware-mcp` cloned as a sibling directory (`~/quantum-hardware-mcp`) with its own dependencies installed, since it imports that repo directly to diff against it.
 
@@ -302,8 +310,10 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] Intelligence layer (`recommend_tolerance`) — first real, bounded, honestly-caveated recommendation built on top of Memory
 - [x] The two deliberate exceptions to "`quantum-hardware-mcp` stays untouched" — its own `ionq_submit_job` had the identical unfixed RZZ bug, and the identical bare-`"simulator"`-gateset bug, in its own stated safety guarantee; ported both fixes back, verified against its full existing test suite (92/92 unchanged) before each commit
 - [x] Resolved the residual discrepancy that was blocking the angle-error experiment — a missing duration-decay term in the analysis model, not real angle-dependence or a pipeline bug. First honest public characterization of this behavior for Forte-class hardware.
+- [x] Checkable-structure experiment templates (`core/templates.py`) — GHZ parity check and a graph-coloring oracle, generalizing the Pascal's-triangle equality-oracle pattern into a small reusable library, each with its own O(1)/O(edges) classical verifier
 
 **Next**
+- [ ] Wire the checkable-structure templates into `mcp_server.py` as callable tools — currently a `core/` library only, not yet exposed
 - [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bugs are fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
 - [ ] Postmortem — automatic explanation of *why* a specific prediction was wrong, not just that it was; needs more real failure-mode data than currently exists
 - [ ] Make Experiment Memory shared across users/machines instead of a local file — right now it only gets smarter for whoever is running it

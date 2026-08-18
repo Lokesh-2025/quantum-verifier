@@ -59,13 +59,24 @@ def test_estimate_ionq_gates_matches_old_repo():
 
 
 def test_estimate_ionq_cost_matches_old_repo():
-    """Pure function over gate-count math — no live API call, must match exactly."""
+    """Pure function over gate-count math. The old repo reports a single
+    estimated_total_usd point; the new one deliberately reports a
+    [low, high] range instead — two real data points on this project's own
+    hardware imply per-gate rates 2.65x apart, so a single fake-precise
+    number would be less honest (see providers/ionq.py::estimate_ionq_cost
+    docstring). Not a schema regression: confirm the old point estimate
+    falls within the new range, and every other field still matches
+    exactly."""
     old = _load_old_server()
     from providers.ionq import estimate_ionq_cost as new_estimate_ionq_cost
 
     old_result = json.loads(old.estimate_ionq_cost([BELL], shots=4096))
     new_result = new_estimate_ionq_cost([BELL], shots=4096)
 
+    old_cost = old_result.pop("estimated_total_usd")
+    new_low = new_result.pop("estimated_total_usd_low")
+    new_high = new_result.pop("estimated_total_usd_high")
+    assert new_low <= old_cost <= new_high
     assert old_result == new_result
 
 
