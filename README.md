@@ -6,8 +6,8 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 
 | | |
 |---|---|
-| **Tools** | 35 |
-| **Tests** | 41, all passing |
+| **Tools** | 39 |
+| **Tests** | 59, all passing (1 excluded — external IonQ account quota issue, not a code bug) |
 | **Real bugs caught before they cost anything** | 4 |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
@@ -126,11 +126,11 @@ circuit + target device + (optional) expected result
 
 Plus the general-purpose device-intelligence, job-lifecycle, account/budget visibility (`ionq_account_check`, `ibm_account_check`), and IonQ pre-flight tooling, carried over from and extended beyond `quantum-hardware-mcp`.
 
-**Checkable-structure experiment templates** (`core/templates.py`) — the only honest way to verify a result once a circuit is too big to classically simulate (roughly 50+ qubits) is to only run problems whose correct answer is cheap to check, even though finding it was hard — the same principle `equality_oracle_search` already uses for Pascal's-triangle collisions. Two generators so far, each paired with its own lightweight classical verifier:
-- `ghz_parity_check_circuit` / `verify_ghz_parity` — a GHZ state's only valid outcomes are all-0 or all-1, so this stays checkable at *any* qubit count with zero simulation, giving a real fidelity lower bound.
-- `graph_coloring_oracle_circuit` / `verify_graph_coloring` — an LNAA-style oracle (same RZZ-phase-kick + RX-mixing structure as `equality_oracle_search`) that amplifies valid 2-colorings of a graph; checking a candidate is O(edges) even though the search space is exponential.
+**`run_ghz_parity_check` / `run_graph_coloring_search`** — checkable-structure experiment templates (`core/templates.py`). The only honest way to verify a result once a circuit is too big to classically simulate (roughly 50+ qubits) is to only run problems whose correct answer is cheap to check, even though finding it was hard — the same principle `equality_oracle_search` already uses for Pascal's-triangle collisions. Two generators so far, each with its own lightweight classical verifier: a GHZ parity check (only valid outcomes are all-0 or all-1, checkable at *any* qubit count with zero simulation) and a graph-coloring oracle (LNAA-style, same RZZ-phase-kick + RX-mixing structure as `equality_oracle_search`; checking a candidate coloring is O(edges) even though the search space is exponential).
 
-Currently a `core/` library, not yet wired into `mcp_server.py` as callable tools — see Roadmap.
+**`find_optimal_backend`** — cross-provider pre-flight comparison (`core/optimal_backend.py`). Real cost (IBM's free-tier QPU-minutes quota; IonQ's dollar range) and real quality (IBM's live-calibration fidelity estimate; IonQ's noisy-simulation fidelity proxy, computed from an actual noise-model run vs. the ideal case) for the same circuit on both providers, side by side — not collapsed into one fake score, since the two providers' signals are computed in genuinely different ways.
+
+**`diff_compilers`** — multi-compiler diff engine (`core/multi_compiler.py`), Qiskit vs. TKET, IBM only. Every transpiler makes different, sometimes bad, silent compilation choices for the same target — this project already found one real instance (the RZZ→native-ZZ bug documented above). Converting a circuit between frameworks is itself a real bug surface, so neither compiler's output is trusted at face value: each is independently checked against the *original* circuit via exact unitary equivalence (correcting for real routing-induced qubit-layout permutation, not just gate count) before being compared or recommended. IonQ is out of scope for now — `pytket-ionq` has dependency conflicts with the `qiskit`/`qiskit-ionq` versions this project already depends on.
 
 ---
 
@@ -160,7 +160,7 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 
 ---
 
-## Tools (35 total)
+## Tools (39 total)
 
 ### Core — the Verifier, control-experiment generator, robustness, and learning
 
@@ -171,6 +171,10 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 | `find_robust_circuit` | Picks the most real-noise-resistant candidate between several circuits, instead of whichever wins in a perfect noiseless simulation |
 | `memory_summary` | How trustworthy this tool's predictions have really been, by provider/device, from real recorded prediction-vs-reality pairs |
 | `recommend_tolerance` | Data-driven `amplification_tolerance` recommendation from real accuracy history — honest default fallback with too little data |
+| `run_ghz_parity_check` | Checkable-structure GHZ experiment — verifiable at any qubit count, zero simulation needed |
+| `run_graph_coloring_search` | Checkable-structure graph-coloring oracle — O(edges) classical verification of amplified candidates |
+| `find_optimal_backend` | Cross-provider cost/quality comparison (IBM QPU-minutes + fidelity estimate vs. IonQ dollar range + noisy-simulation fidelity proxy), side by side |
+| `diff_compilers` | Qiskit vs. TKET compilation diff for a real IBM device — each result independently verified via exact unitary equivalence before being compared |
 
 ### IBM — device intelligence, job lifecycle, and account visibility
 
@@ -224,7 +228,9 @@ quantum-verifier/
 │   ├── robustness.py          # find_robust_circuit — real-noise-aware selection
 │   ├── memory.py               # Experiment Memory — prediction-vs-reality tracking
 │   ├── intelligence.py        # recommend_tolerance — data-driven, on top of memory
-│   └── templates.py           # checkable-structure experiment generators (GHZ, graph coloring)
+│   ├── templates.py           # checkable-structure experiment generators (GHZ, graph coloring)
+│   ├── optimal_backend.py     # find_optimal_backend — cross-provider cost/quality comparison
+│   └── multi_compiler.py      # diff_compilers — Qiskit vs TKET, IBM only, layout-verified
 ├── providers/
 │   ├── ibm.py                 # device intelligence, job lifecycle, account/quota check
 │   └── ionq.py                # device listing, batched self-checked submission,
@@ -239,7 +245,9 @@ quantum-verifier/
 │   ├── test_ionq_tooling.py         # account/device/robustness/budget checks
 │   ├── test_ibm_tooling.py          # IBM account/quota check
 │   ├── test_intelligence.py         # recommend_tolerance
-│   └── test_templates.py            # checkable-structure experiment generators
+│   ├── test_templates.py            # checkable-structure experiment generators
+│   ├── test_optimal_backend.py      # cross-provider cost/quality comparison
+│   └── test_multi_compiler.py       # Qiskit vs TKET diff, layout-verified
 ├── experiment_memory.db        # local SQLite store, gitignored — Experiment Memory's data
 └── requirements.txt
 ```
@@ -252,7 +260,7 @@ quantum-verifier/
 pytest tests/
 ```
 
-49 tests across 7 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, and the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates. All simulator-only or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above).
+59 tests across 9 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates, `find_optimal_backend` correctly reporting each provider's real cost/quality signal in its own units, and `diff_compilers` correctly verifying both Qiskit's and TKET's real IBM-targeted compilations against the original circuit. All simulator-only, transpile-only, or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above).
 
 `test_side_by_side_old_repo.py` needs `quantum-hardware-mcp` cloned as a sibling directory (`~/quantum-hardware-mcp`) with its own dependencies installed, since it imports that repo directly to diff against it.
 
@@ -310,10 +318,12 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] Intelligence layer (`recommend_tolerance`) — first real, bounded, honestly-caveated recommendation built on top of Memory
 - [x] The two deliberate exceptions to "`quantum-hardware-mcp` stays untouched" — its own `ionq_submit_job` had the identical unfixed RZZ bug, and the identical bare-`"simulator"`-gateset bug, in its own stated safety guarantee; ported both fixes back, verified against its full existing test suite (92/92 unchanged) before each commit
 - [x] Resolved the residual discrepancy that was blocking the angle-error experiment — a missing duration-decay term in the analysis model, not real angle-dependence or a pipeline bug. First honest public characterization of this behavior for Forte-class hardware.
-- [x] Checkable-structure experiment templates (`core/templates.py`) — GHZ parity check and a graph-coloring oracle, generalizing the Pascal's-triangle equality-oracle pattern into a small reusable library, each with its own O(1)/O(edges) classical verifier
+- [x] Checkable-structure experiment templates (`core/templates.py`, `run_ghz_parity_check` / `run_graph_coloring_search`) — GHZ parity check and a graph-coloring oracle, generalizing the Pascal's-triangle equality-oracle pattern into a small reusable library, wired in as callable tools
+- [x] `find_optimal_backend` (`core/optimal_backend.py`) — cross-provider cost/quality comparison, IBM's QPU-minutes quota + live-calibration fidelity estimate vs. IonQ's dollar range + noisy-simulation fidelity proxy, reported side by side rather than collapsed into one fake score
+- [x] `diff_compilers` (`core/multi_compiler.py`) — Qiskit vs. TKET compilation diff for real IBM devices, each result independently verified via exact unitary equivalence (with real routing-induced layout-permutation correction, caught and fixed during this work — a naive gate-count comparison would have reported a false failure); found a real case where TKET produced half the two-qubit gates Qiskit did for the same circuit and device. IonQ scoped out — `pytket-ionq` has dependency conflicts with this project's existing `qiskit`/`qiskit-ionq` versions
+- [x] Hardened `hardware_aware_simulation`'s IonQ path to return a clean error instead of an unhandled exception on backend-resolution failure — found via `find_optimal_backend`'s own test suite, benefits every caller (`verify_experiment`, `falsify_claim`, the templates, not just the new tool)
 
 **Next**
-- [ ] Wire the checkable-structure templates into `mcp_server.py` as callable tools — currently a `core/` library only, not yet exposed
 - [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bugs are fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
 - [ ] Postmortem — automatic explanation of *why* a specific prediction was wrong, not just that it was; needs more real failure-mode data than currently exists
 - [ ] Make Experiment Memory shared across users/machines instead of a local file — right now it only gets smarter for whoever is running it

@@ -276,28 +276,31 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
         if not api_key:
             return {"error": "IONQ_API_KEY not set"}
         from providers.ionq import _resolve_ionq_backend, _ionq_is_hardware
-        resolved = _resolve_ionq_backend(target_device)
-        ionq_provider = IonQProvider(api_key)
-        # Transpiling against the bare "ionq_simulator" target silently picks
-        # its DEFAULT native gateset, which is the legacy Aria-only MS gate,
-        # not Forte's zz -- the exact trap estimate_ionq_gates/estimate_ionq_cost
-        # already document and avoid by defaulting to forte-1's real target.
-        # A gate-count/structure check needs a REAL device's native gateset
-        # even when no noise model will be applied (no specific hardware
-        # requested), so target the transpile at forte-1 in that case while
-        # still executing on the free simulator with no noise.
-        transpile_target_name = "qpu.forte-1" if resolved == "ionq_simulator" else resolved
-        target_backend = ionq_provider.get_backend(transpile_target_name, gateset="native")
-        sim_backend = ionq_provider.get_backend("ionq_simulator", gateset="native")
-        if _ionq_is_hardware(resolved):
-            sim_backend.set_options(noise_model=resolved.replace("qpu.", ""))
-        # Split any rzz beyond the native gate's valid angle range BEFORE
-        # transpiling, so the 1:1 equivalence applies cleanly to every chunk
-        # instead of the transpiler rejecting/mis-synthesizing an out-of-range angle.
-        decomposed_circuit = _decompose_large_angle_rzz(circuit)
-        t_qc = transpile(decomposed_circuit, backend=target_backend, optimization_level=1)
-        sim_job = sim_backend.run(t_qc, shots=shots)
-        counts = sim_job.result().get_counts()
+        try:
+            resolved = _resolve_ionq_backend(target_device)
+            ionq_provider = IonQProvider(api_key)
+            # Transpiling against the bare "ionq_simulator" target silently picks
+            # its DEFAULT native gateset, which is the legacy Aria-only MS gate,
+            # not Forte's zz -- the exact trap estimate_ionq_gates/estimate_ionq_cost
+            # already document and avoid by defaulting to forte-1's real target.
+            # A gate-count/structure check needs a REAL device's native gateset
+            # even when no noise model will be applied (no specific hardware
+            # requested), so target the transpile at forte-1 in that case while
+            # still executing on the free simulator with no noise.
+            transpile_target_name = "qpu.forte-1" if resolved == "ionq_simulator" else resolved
+            target_backend = ionq_provider.get_backend(transpile_target_name, gateset="native")
+            sim_backend = ionq_provider.get_backend("ionq_simulator", gateset="native")
+            if _ionq_is_hardware(resolved):
+                sim_backend.set_options(noise_model=resolved.replace("qpu.", ""))
+            # Split any rzz beyond the native gate's valid angle range BEFORE
+            # transpiling, so the 1:1 equivalence applies cleanly to every chunk
+            # instead of the transpiler rejecting/mis-synthesizing an out-of-range angle.
+            decomposed_circuit = _decompose_large_angle_rzz(circuit)
+            t_qc = transpile(decomposed_circuit, backend=target_backend, optimization_level=1)
+            sim_job = sim_backend.run(t_qc, shots=shots)
+            counts = sim_job.result().get_counts()
+        except Exception as e:
+            return {"error": f"IonQ hardware-aware simulation failed: {e}"}
         noise_model_used = sim_backend.options.noise_model
         simulation_type = (
             f"full noisy simulation using {noise_model_used}'s real, named noise model"

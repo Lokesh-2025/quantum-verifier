@@ -14,6 +14,10 @@ from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
 from core.intelligence import recommend_tolerance as _recommend_tolerance
+from core.templates import run_ghz_parity_check as _run_ghz_parity_check
+from core.templates import run_graph_coloring_search as _run_graph_coloring_search
+from core.optimal_backend import find_optimal_backend as _find_optimal_backend
+from core.multi_compiler import diff_compilers as _diff_compilers
 import providers.ibm as ibm
 import providers.ionq as ionq
 
@@ -93,6 +97,66 @@ def falsify_claim(
         shots               : shots per circuit (default 4096)
     """
     return json.dumps(_falsify(qasm_string, provider, target_device, marked_bitstrings, shots), indent=2)
+
+
+@mcp.tool()
+def run_ghz_parity_check(n_qubits: int, provider: str, target_device: str, shots: int = 4096) -> str:
+    """
+    Checkable-structure experiment: builds an n-qubit GHZ state, runs it
+    through hardware-aware simulation, and classically verifies the result.
+    A GHZ state's only valid outcomes are all-0 or all-1 — that stays
+    checkable at ANY qubit count with zero simulation of the ideal state,
+    so this works even past the ~50-qubit classical-simulability wall.
+    Reports a real fidelity lower bound: P(all-0) + P(all-1).
+
+    Args:
+        n_qubits      : size of the GHZ state (>= 2)
+        provider      : "ibm" or "ionq"
+        target_device : e.g. "ibm_fez", "forte-1", "simulator"
+        shots         : shots for the simulation (default 4096)
+
+    Only produces a checkable verdict on the IonQ path today — IBM's
+    hardware-aware simulation returns a fidelity estimate, not raw counts
+    (same limitation falsify_claim has).
+    """
+    return json.dumps(_run_ghz_parity_check(n_qubits, provider, target_device, shots), indent=2)
+
+
+@mcp.tool()
+def run_graph_coloring_search(
+    edges: list,
+    n_vertices: int,
+    provider: str,
+    target_device: str,
+    p_layers: int = 3,
+    gamma: float = 1.0,
+    beta: float = 0.8,
+    shots: int = 4096,
+    top_n: int = 10,
+) -> str:
+    """
+    Checkable-structure experiment: an LNAA-style oracle (same RZZ-phase-kick
+    + RX-mixing structure as equality_oracle_search) that amplifies valid
+    2-colorings of a graph. Finding a good coloring is hard; checking one
+    is O(edges) — cheap even when the search space is exponential.
+
+    Args:
+        edges         : list of [i, j] vertex pairs (0-indexed)
+        n_vertices    : number of vertices (>= 2)
+        provider      : "ibm" or "ionq"
+        target_device : e.g. "ibm_fez", "forte-1", "simulator"
+        p_layers      : oracle depth (default 3)
+        gamma, beta   : RZZ phase-kick / RX mixing angles (defaults 1.0, 0.8)
+        shots         : shots for the simulation (default 4096)
+        top_n         : how many top-measured candidates to classically check
+
+    Only produces a checkable verdict on the IonQ path today — same
+    counts-vs-fidelity-estimate limitation as falsify_claim.
+    """
+    return json.dumps(
+        _run_graph_coloring_search(edges, n_vertices, provider, target_device, p_layers, gamma, beta, shots, top_n),
+        indent=2,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -326,6 +390,56 @@ def ionq_compare_devices() -> str:
     habit. IonQ equivalent of the IBM-side compare_devices tool.
     """
     return json.dumps(ionq.ionq_compare_devices(), indent=2)
+
+
+@mcp.tool()
+def find_optimal_backend(
+    qasm_string: str,
+    ibm_device: str = "",
+    ionq_device: str = "forte-1",
+    shots: int = 4096,
+) -> str:
+    """
+    Cross-provider pre-flight comparison: what would this same circuit
+    actually cost, and how good would the result actually be, on IBM vs
+    IonQ? Reports real cost (IBM's free-tier QPU-minutes quota; IonQ's
+    dollar range from estimate_ionq_cost) and real quality (IBM's live-
+    calibration fidelity estimate; IonQ's noisy-simulation fidelity proxy,
+    computed from an actual noise-model run vs the ideal case) side by
+    side — NOT collapsed into one fake score, since the two providers'
+    cost and quality signals are computed in genuinely different ways.
+
+    Args:
+        qasm_string : OpenQASM 2.0 circuit string
+        ibm_device  : IBM backend name (e.g. "ibm_fez") — leave blank to skip IBM
+        ionq_device : IonQ target (e.g. "forte-1") — leave blank to skip IonQ
+        shots       : shots used for both providers' estimates (default 4096)
+    """
+    return json.dumps(_find_optimal_backend(qasm_string, ibm_device, ionq_device, shots), indent=2)
+
+
+@mcp.tool()
+def diff_compilers(qasm_string: str, ibm_device: str) -> str:
+    """
+    Multi-compiler diff: transpiles the same circuit via Qiskit and TKET
+    against a real IBM device's native gate set and compares them. Every
+    transpiler makes different, sometimes bad, silent compilation choices
+    for the same target — this project already found one real instance
+    (Qiskit's rzz -> IonQ-native-ZZ synthesis bug). Converting a circuit
+    between frameworks is itself a real bug surface, so neither result is
+    trusted at face value: each is independently checked against the
+    ORIGINAL circuit via exact unitary equivalence before being compared
+    or recommended (skipped above 12 qubits — exponential cost — and
+    reported as such, not silently guessed).
+
+    IBM only, deliberately: pytket-ionq has dependency conflicts with the
+    qiskit/qiskit-ionq versions this project already depends on.
+
+    Args:
+        qasm_string : OpenQASM 2.0 circuit string
+        ibm_device  : real IBM backend name (e.g. "ibm_fez")
+    """
+    return json.dumps(_diff_compilers(qasm_string, ibm_device), indent=2)
 
 
 @mcp.tool()

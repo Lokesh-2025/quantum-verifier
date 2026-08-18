@@ -6,12 +6,21 @@ Confirms each generator produces a circuit whose ideal (noiseless) output
 is correctly classified by its paired classical verifier, and that the
 verifier correctly rejects invalid candidates it's handed directly.
 """
+import os
+import pytest
+from dotenv import load_dotenv
+
+load_dotenv()
+IONQ_KEY_PRESENT = bool(os.getenv("IONQ_API_KEY"))
+
 from core.verifier import ideal_simulation
 from core.templates import (
     ghz_parity_check_circuit,
     verify_ghz_parity,
     graph_coloring_oracle_circuit,
     verify_graph_coloring,
+    run_ghz_parity_check,
+    run_graph_coloring_search,
 )
 
 
@@ -87,3 +96,26 @@ def test_graph_coloring_oracle_rejects_edge_outside_vertex_range():
 def test_verify_graph_coloring_handles_empty_counts():
     result = verify_graph_coloring({}, edges=[(0, 1)])
     assert result["applicable"] is False
+
+
+# ------------------------------------------------------------- orchestrators
+# Live IonQ free-simulator calls (no real hardware, no cost) — same
+# skip-without-API-key pattern as tests/test_verifier.py.
+
+
+@pytest.mark.skipif(not IONQ_KEY_PRESENT, reason="IONQ_API_KEY not set")
+def test_run_ghz_parity_check_end_to_end_on_ionq_simulator():
+    result = run_ghz_parity_check(n_qubits=4, provider="ionq", target_device="simulator", shots=1024)
+    assert "error" not in result
+    assert result["applicable"]
+    assert result["fidelity_lower_bound"] > 0.95  # noiseless free simulator, should be near-perfect
+
+
+@pytest.mark.skipif(not IONQ_KEY_PRESENT, reason="IONQ_API_KEY not set")
+def test_run_graph_coloring_search_end_to_end_on_ionq_simulator():
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    result = run_graph_coloring_search(edges, n_vertices=4, provider="ionq", target_device="simulator",
+                                        p_layers=4, shots=2048)
+    assert "error" not in result
+    assert result["applicable"]
+    assert result["any_valid_coloring_found"]

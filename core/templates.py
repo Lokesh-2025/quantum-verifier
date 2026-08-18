@@ -29,6 +29,8 @@ generic framework guess.
 """
 from qiskit import QuantumCircuit
 
+from core.verifier import hardware_aware_simulation
+
 
 # --------------------------------------------------------------- GHZ parity
 
@@ -157,3 +159,57 @@ def verify_graph_coloring(counts: dict, edges: list, top_n: int = 10) -> dict:
             "isn't bipartite, or the oracle needs more layers/shots."
         ),
     }
+
+
+# ------------------------------------------------------------- orchestrators
+
+
+def run_ghz_parity_check(n_qubits: int, provider: str, target_device: str, shots: int = 4096) -> dict:
+    """
+    One-call version: build the GHZ circuit, run it through hardware-aware
+    simulation, and classically verify the result — same one-call shape as
+    verify_experiment/falsify_claim.
+
+    IBM's hardware-aware path returns a fidelity estimate, not raw counts,
+    so this only produces a checkable verdict on the IonQ path today (same
+    limitation falsify_claim already has and documents).
+    """
+    circuit = ghz_parity_check_circuit(n_qubits)
+    sim = hardware_aware_simulation(circuit, provider, target_device, shots)
+    if "error" in sim:
+        return {"error": sim["error"]}
+    result = {
+        "n_qubits": n_qubits, "provider": provider, "target_device": target_device,
+        "simulation_type": sim.get("simulation_type"),
+    }
+    result.update(verify_ghz_parity(sim.get("counts")))
+    return result
+
+
+def run_graph_coloring_search(
+    edges: list,
+    n_vertices: int,
+    provider: str,
+    target_device: str,
+    p_layers: int = 3,
+    gamma: float = 1.0,
+    beta: float = 0.8,
+    shots: int = 4096,
+    top_n: int = 10,
+) -> dict:
+    """
+    One-call version: build the graph-coloring oracle, run it through
+    hardware-aware simulation, and classically verify the top candidates.
+
+    Same IBM/counts limitation as run_ghz_parity_check above.
+    """
+    circuit = graph_coloring_oracle_circuit(edges, n_vertices, p_layers, gamma, beta)
+    sim = hardware_aware_simulation(circuit, provider, target_device, shots)
+    if "error" in sim:
+        return {"error": sim["error"]}
+    result = {
+        "n_vertices": n_vertices, "edges": edges, "provider": provider, "target_device": target_device,
+        "simulation_type": sim.get("simulation_type"),
+    }
+    result.update(verify_graph_coloring(sim.get("counts"), edges, top_n))
+    return result
