@@ -215,9 +215,20 @@ def device_on_date(device_name: str, date: str) -> str:
 
 
 @mcp.tool()
-def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2) -> str:
-    """Compile and submit a circuit to an IBM quantum computer. Prefer calling verify_experiment first."""
-    return json.dumps(ibm.submit_job(device_name, qasm_string, shots, qasm_version), indent=2)
+def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2,
+                initial_layout: list = None) -> str:
+    """
+    Compile and submit a circuit to an IBM quantum computer. Prefer calling
+    verify_experiment first.
+
+    initial_layout : optional list of physical qubit indices, one per
+        logical qubit in order. Without it, the transpiler picks its own
+        layout automatically. Pass it explicitly to guarantee the real
+        submission uses a specific, already-verified qubit selection
+        (e.g. confirmed low-error, confirmed SWAP-free for this circuit)
+        instead of trusting the transpiler to pick the same one again.
+    """
+    return json.dumps(ibm.submit_job(device_name, qasm_string, shots, qasm_version, initial_layout), indent=2)
 
 
 @mcp.tool()

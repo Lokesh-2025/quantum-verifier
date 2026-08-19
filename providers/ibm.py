@@ -429,8 +429,19 @@ def device_on_date(device_name: str, date: str) -> dict:
     }
 
 
-def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2) -> dict:
-    """Compile and submit a circuit to an IBM quantum computer."""
+def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2,
+                initial_layout: list = None) -> dict:
+    """
+    Compile and submit a circuit to an IBM quantum computer.
+
+    initial_layout : optional list of physical qubit indices, one per
+        logical qubit in order. Without it, the transpiler picks its own
+        layout automatically -- fine in general, but it means a separately
+        verified qubit selection (e.g. specific low-error qubits, confirmed
+        SWAP-free for a specific circuit) is NOT guaranteed to be what
+        actually runs. Pass it explicitly whenever the submission needs to
+        match a layout that was already checked.
+    """
     try:
         circuit = qiskit_qasm3.loads(qasm_string) if qasm_version == 3 else QuantumCircuit.from_qasm_str(qasm_string)
     except Exception as e:
@@ -444,7 +455,10 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
     quota_check = _check_ibm_quota_before_submitting(device_name, circuit, shots)
     if quota_check.get("error"):
         return quota_check
-    pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
+    if initial_layout is not None and len(initial_layout) != circuit.num_qubits:
+        return {"error": f"initial_layout has {len(initial_layout)} entries but the circuit has "
+                          f"{circuit.num_qubits} qubits — must match exactly."}
+    pm = generate_preset_pass_manager(backend=backend, optimization_level=1, initial_layout=initial_layout)
     isa_circuit = pm.run(circuit)
     sampler = Sampler(mode=backend)
     job = sampler.run([isa_circuit], shots=shots)
@@ -453,6 +467,7 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
     return {
         "job_id": job.job_id(), "status": str(job.status()),
         "device": device_name, "shots": shots,
+        "initial_layout_used": initial_layout,
     }
 
 
