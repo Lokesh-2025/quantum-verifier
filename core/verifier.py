@@ -184,6 +184,19 @@ def topology_check(circuit: QuantumCircuit, provider: str) -> dict:
 GATE_INFLATION_MAX_RATIO = 8.0
 TWO_QUBIT_GATE_INFLATION_MAX_RATIO = 1.5
 
+# Fixed-angle native two-qubit gates (cz, cx, ecr) cannot directly implement
+# an arbitrary-angle rzz -- the standard, minimal, EXACT construction needs
+# 2 of them (sandwich a single-qubit RZ between two copies), confirmed
+# directly: an isolated rzz transpiled against ibm_fez's real cz-native
+# basis produces exactly 2 cz, not more, not fewer. That's the correct
+# answer, not inflation -- IonQ's native ZZ gate is TUNABLE (any angle
+# directly), so 1:1 is the right bar there, but holding CZ/CX/ECR-native
+# devices to that same 1.5x threshold flags a real device's optimal,
+# unavoidable result as a false failure. Confirmed on real ibm_fez data:
+# both e1_single and e1_ring transpiled at exactly 2.0x, consistently.
+FIXED_ANGLE_NATIVE_TWO_QUBIT_GATES = {"cz", "cx", "ecr"}
+FIXED_ANGLE_TWO_QUBIT_GATE_INFLATION_MAX_RATIO = 2.5
+
 
 def _count_two_qubit_gates(circuit: QuantumCircuit) -> int:
     return sum(1 for instr in circuit.data if len(instr.qubits) == 2)
@@ -205,6 +218,16 @@ def gate_synthesis_check(circuit: QuantumCircuit, transpiled: QuantumCircuit) ->
     _register_ionq_native_equivalences call) fixes IonQ's RZZ case
     specifically; this check exists to catch the *general* class for any
     gate/target combination that hits the same kind of gap.
+
+    The "correct" ratio depends on whether the target's native two-qubit
+    gate is tunable or fixed-angle -- IonQ's native ZZ gate takes any
+    angle directly, so 1:1 is the right bar there. IBM's native CZ (and
+    CX/ECR) are fixed-angle, so an arbitrary-angle rzz needs exactly 2 of
+    them (sandwich a single-qubit RZ between two copies) -- that's the
+    real, unavoidable minimum, confirmed directly against ibm_fez's real
+    basis (an isolated rzz transpiles to exactly 2 cz, not more). Holding
+    fixed-angle-native devices to the same 1.5x bar as tunable ones would
+    flag a device's correct, optimal result as a false failure.
     """
     logical_ops = {k: v for k, v in circuit.count_ops().items() if k not in ("measure", "barrier")}
     transpiled_ops = {k: v for k, v in transpiled.count_ops().items() if k not in ("measure", "barrier")}
@@ -216,6 +239,15 @@ def gate_synthesis_check(circuit: QuantumCircuit, transpiled: QuantumCircuit) ->
     transpiled_2q = _count_two_qubit_gates(transpiled)
     two_qubit_inflation_ratio = (transpiled_2q / logical_2q) if logical_2q else 1.0
 
+    transpiled_2q_gate_names = {
+        instr.operation.name for instr in transpiled.data if len(instr.qubits) == 2
+    }
+    uses_fixed_angle_native_gate = bool(transpiled_2q_gate_names & FIXED_ANGLE_NATIVE_TWO_QUBIT_GATES)
+    two_qubit_threshold = (
+        FIXED_ANGLE_TWO_QUBIT_GATE_INFLATION_MAX_RATIO if uses_fixed_angle_native_gate
+        else TWO_QUBIT_GATE_INFLATION_MAX_RATIO
+    )
+
     violations = []
     if inflation_ratio > GATE_INFLATION_MAX_RATIO:
         violations.append({
@@ -226,15 +258,16 @@ def gate_synthesis_check(circuit: QuantumCircuit, transpiled: QuantumCircuit) ->
                        f"(threshold {GATE_INFLATION_MAX_RATIO}x) — likely a missing direct "
                        "equivalence to the target's native gateset, not real routing overhead.",
         })
-    if logical_2q and two_qubit_inflation_ratio > TWO_QUBIT_GATE_INFLATION_MAX_RATIO:
+    if logical_2q and two_qubit_inflation_ratio > two_qubit_threshold:
         violations.append({
             "check": "two_qubit_gate_inflation",
             "logical_two_qubit_gates": logical_2q, "transpiled_two_qubit_gates": transpiled_2q,
             "inflation_ratio": round(two_qubit_inflation_ratio, 2),
             "message": f"{logical_2q} logical two-qubit gate(s) became {transpiled_2q} native "
                        f"two-qubit gate(s) ({two_qubit_inflation_ratio:.1f}x, threshold "
-                       f"{TWO_QUBIT_GATE_INFLATION_MAX_RATIO}x) — a correctly-mapped native gate "
-                       "should be close to 1:1, not require multi-gate re-synthesis.",
+                       f"{two_qubit_threshold}x for {'fixed-angle' if uses_fixed_angle_native_gate else 'tunable'} "
+                       f"native gates {sorted(transpiled_2q_gate_names) or '(none)'}) — likely a missing direct "
+                       "equivalence to the target's native gateset, not the expected minimal decomposition.",
         })
 
     return {
@@ -242,6 +275,8 @@ def gate_synthesis_check(circuit: QuantumCircuit, transpiled: QuantumCircuit) ->
         "logical_gate_count": logical_total, "transpiled_gate_count": transpiled_total,
         "inflation_ratio": round(inflation_ratio, 2),
         "logical_two_qubit_gates": logical_2q, "transpiled_two_qubit_gates": transpiled_2q,
+        "two_qubit_gate_inflation_threshold_used": two_qubit_threshold,
+        "native_two_qubit_gates": sorted(transpiled_2q_gate_names),
         "violations": violations,
     }
 
