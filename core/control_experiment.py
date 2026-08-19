@@ -99,9 +99,9 @@ def falsify(
     real_counts = real_sim.get("counts")
     control_counts = control_sim.get("counts")
     if not real_counts or not control_counts:
-        result["note"] = ("IBM's hardware-aware path returns a fidelity estimate, not raw "
-                           "counts — the control-experiment comparison needs actual counts, "
-                           "so this only works on the IonQ path today.")
+        result["note"] = ("hardware_aware_simulation didn't return counts for this run — check "
+                           "simulation_type above for why (e.g. the local Aer noisy simulation "
+                           "failed for this specific circuit/backend combination).")
         return result
 
     if marked_bitstrings:

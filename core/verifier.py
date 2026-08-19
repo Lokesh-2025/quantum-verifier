@@ -329,11 +329,41 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
     cx_errors = _cx_errors_for_backend(props) if props else []
     avg_cx_error = sum(cx_errors) / len(cx_errors) if cx_errors else 0.005
     estimated_fidelity = round((1 - avg_cx_error) ** n_cx, 4) if n_cx > 0 else 1.0
+
+    # Real noisy simulation, not just a product-of-errors estimate: build an
+    # Aer noise model from this backend's ACTUAL live calibration data
+    # (qiskit_aer.noise.NoiseModel.from_backend), then run it locally, for
+    # free -- no QPU time spent. This is the same shape as IonQ's free-
+    # simulator-with-a-real-named-noise-model path, closing a real gap:
+    # falsify_claim needs actual counts to compare real-vs-control, and an
+    # estimate alone can't provide that. Previously IBM had no counts here
+    # at all, so falsify_claim only worked on the IonQ path -- confirmed
+    # directly against the code, not assumed.
+    counts, total_shots, noisy_sim_error = None, None, None
+    try:
+        from qiskit_aer import AerSimulator
+        from qiskit_aer.noise import NoiseModel
+        noise_model = NoiseModel.from_backend(backend)
+        noisy_backend = AerSimulator(noise_model=noise_model, coupling_map=backend.coupling_map,
+                                      basis_gates=noise_model.basis_gates)
+        noisy_job = noisy_backend.run(isa_circuit, shots=shots)
+        counts = noisy_job.result().get_counts()
+        total_shots = sum(counts.values())
+    except Exception as e:
+        noisy_sim_error = str(e)
+
     return {
+        "counts": counts, "total_shots": total_shots,
         "estimated_fidelity": estimated_fidelity,
         "transpiled_gate_count": sum(transpiled_gates.values()),
         "n_two_qubit_gates": n_cx,
-        "simulation_type": "fidelity estimate from live calibration data (not a full noisy simulation)",
+        "simulation_type": (
+            "full noisy simulation using a local Aer noise model built from this backend's real, "
+            "live calibration data (qiskit_aer NoiseModel.from_backend) -- plus a calibration-based "
+            "fidelity estimate for backward compatibility"
+            if counts is not None else
+            f"fidelity estimate only -- real noisy simulation failed: {noisy_sim_error}"
+        ),
         "gate_synthesis_check": gate_synthesis_check(circuit, isa_circuit),
     }
 

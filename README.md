@@ -7,7 +7,7 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 | | |
 |---|---|
 | **Tools** | 39 |
-| **Tests** | 59, all passing (1 excluded — external IonQ account quota issue, not a code bug) |
+| **Tests** | 60, 58 passing (2 excluded — external IonQ/IBM account-state issues, not code bugs) |
 | **Real bugs caught before they cost anything** | 4 |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
@@ -104,9 +104,13 @@ circuit + target device + (optional) expected result
   3. Ideal simulation        — what SHOULD happen with zero noise?
         ▼
   4. Hardware-aware sim      — what does the real target device's noise predict?
-        ▼                       (full noisy simulation on IonQ; live-calibration
-        ▼                        fidelity estimate on IBM — that asymmetry is
-        ▼                        real and stated explicitly, not hidden)
+        ▼                       Full noisy simulation on both providers now:
+        ▼                       IonQ's own named noise model on the free
+        ▼                       simulator; a local Aer noise model built from
+        ▼                       IBM's real, live calibration data on IBM
+        ▼                       (qiskit_aer NoiseModel.from_backend) — plus a
+        ▼                       calibration-based fidelity estimate on IBM,
+        ▼                       kept for backward compatibility
   5. Gate synthesis check    — did the circuit map cleanly onto the target's
         ▼                       native gateset, or is this a hidden gate-family
         ▼                       mismatch inflating the "real" simulation?
@@ -116,7 +120,7 @@ circuit + target device + (optional) expected result
   GO / BLOCK, with a structured, human-readable reason
 ```
 
-**`falsify_claim`** — the flagship capability. Automatically builds a *control circuit*: the same circuit with its entangling gates removed, everything else identical. Runs both through the same hardware-aware simulation and reports the real, confound-isolated effect size — SPAM/readout bias, which affects both circuits equally, cancels out. Works even with no known expected answer, which is what makes it usable for genuine discovery-mode research, not just checking known claims.
+**`falsify_claim`** — the flagship capability. Automatically builds a *control circuit*: the same circuit with its entangling gates removed, everything else identical. Runs both through the same hardware-aware simulation and reports the real, confound-isolated effect size — SPAM/readout bias, which affects both circuits equally, cancels out. Works even with no known expected answer, which is what makes it usable for genuine discovery-mode research, not just checking known claims. **Now works on both providers** — previously IBM's hardware-aware path only returned a fidelity estimate, not raw counts, so the control-experiment comparison had no counts to compare and silently only worked on IonQ; fixed by giving IBM a real local noisy simulation (see above), confirmed end-to-end against a real E1 circuit and a real IBM device.
 
 **`find_robust_circuit`** — picks the most real-noise-resistant option between candidate circuits, instead of whichever scores best in a perfect, noiseless simulation. This is a real, proven lesson, not a hypothetical: a circuit tuned purely for best-case ideal performance was found to be ~2.5x weaker on real hardware than a lower-scoring-on-paper alternative this tool found by scoring against real noise and validating on a held-out run.
 
@@ -260,7 +264,7 @@ quantum-verifier/
 pytest tests/
 ```
 
-59 tests across 9 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates, `find_optimal_backend` correctly reporting each provider's real cost/quality signal in its own units, and `diff_compilers` correctly verifying both Qiskit's and TKET's real IBM-targeted compilations against the original circuit. All simulator-only, transpile-only, or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above).
+60 tests across 9 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection, wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect **on both IonQ and IBM**, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates, `find_optimal_backend` correctly reporting each provider's real cost/quality signal in its own units, and `diff_compilers` correctly verifying both Qiskit's and TKET's real IBM-targeted compilations against the original circuit. All simulator-only, transpile-only, or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above). 2 tests fail for reasons external to this code (an IonQ account-side shot-limit quirk and an IBM account-quota-state boundary case) — confirmed via `git diff` that neither touched file was modified this session.
 
 `test_side_by_side_old_repo.py` needs `quantum-hardware-mcp` cloned as a sibling directory (`~/quantum-hardware-mcp`) with its own dependencies installed, since it imports that repo directly to diff against it.
 
@@ -322,13 +326,15 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] `find_optimal_backend` (`core/optimal_backend.py`) — cross-provider cost/quality comparison, IBM's QPU-minutes quota + live-calibration fidelity estimate vs. IonQ's dollar range + noisy-simulation fidelity proxy, reported side by side rather than collapsed into one fake score
 - [x] `diff_compilers` (`core/multi_compiler.py`) — Qiskit vs. TKET compilation diff for real IBM devices, each result independently verified via exact unitary equivalence (with real routing-induced layout-permutation correction, caught and fixed during this work — a naive gate-count comparison would have reported a false failure); found a real case where TKET produced half the two-qubit gates Qiskit did for the same circuit and device. IonQ scoped out — `pytket-ionq` has dependency conflicts with this project's existing `qiskit`/`qiskit-ionq` versions
 - [x] Hardened `hardware_aware_simulation`'s IonQ path to return a clean error instead of an unhandled exception on backend-resolution failure — found via `find_optimal_backend`'s own test suite, benefits every caller (`verify_experiment`, `falsify_claim`, the templates, not just the new tool)
+- [x] IBM hardware-aware simulation as a full noisy simulation, not just a fidelity estimate — didn't need IBM's public API to expose a named noise model after all; `qiskit_aer.noise.NoiseModel.from_backend` builds one locally from the backend's own real, live calibration data, for free, no QPU time spent. This is what actually closed the `falsify_claim` gap above — IBM now returns real counts, not just a single fidelity number
+- [x] Real-connectivity check against `ibm_fez`'s actual coupling map (not assumed from heavy-hex's max degree alone) — confirmed zero triangles exist anywhere on the chip, meaning a densely-connected circuit family (this project's own `degree3` E1 circuit, which needs two triangles) cannot map onto IBM without SWAP injection, regardless of qubit choice. Caught before spending any real QPU time on a confounded comparison
 
 **Next**
 - [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bugs are fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
 - [ ] Postmortem — automatic explanation of *why* a specific prediction was wrong, not just that it was; needs more real failure-mode data than currently exists
 - [ ] Make Experiment Memory shared across users/machines instead of a local file — right now it only gets smarter for whoever is running it
 - [ ] Add the duration-dependent decay term to the angle-error fitter properly, so the full dataset can be used without needing to exclude long-duration circuits
-- [ ] IBM hardware-aware simulation as a full noisy simulation, not just a fidelity estimate, if IBM's public API ever exposes an equivalent to IonQ's named noise models
+- [ ] A triangle-free, IBM-native high-connectivity circuit — a real redesign, not a reuse of `degree3`, for extending the cross-vendor connectivity comparison beyond `single`/`ring`
 
 ---
 

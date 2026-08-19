@@ -87,10 +87,13 @@ def falsify_claim(
     Args:
         qasm_string        : OpenQASM 2.0 circuit string, must contain at
                               least one entangling (two-qubit) gate
-        provider            : "ibm" or "ionq" (control-circuit comparison
-                              currently only returns counts on the IonQ path
-                              — IBM's hardware-aware simulation is a fidelity
-                              estimate, not raw counts)
+        provider            : "ibm" or "ionq" — both now return real counts.
+                              IonQ: full noisy simulation on the free
+                              simulator with IonQ's real named noise model.
+                              IBM: a local Aer noisy simulation using a
+                              noise model built from this backend's real,
+                              live calibration data (NoiseModel.from_backend)
+                              — zero QPU time spent.
         target_device       : e.g. "forte-1", "simulator"
         marked_bitstrings   : optional — if you have a specific claimed
                               target, isolates its real effect size
