@@ -18,6 +18,8 @@ from core.templates import run_ghz_parity_check as _run_ghz_parity_check
 from core.templates import run_graph_coloring_search as _run_graph_coloring_search
 from core.optimal_backend import find_optimal_backend as _find_optimal_backend
 from core.multi_compiler import diff_compilers as _diff_compilers
+from core.stabilizer import verify_stabilizer_circuit as _verify_stabilizer_circuit
+from core.stabilizer import verify_stabilizer_hardware_result as _verify_stabilizer_hardware_result
 import providers.ibm as ibm
 import providers.ionq as ionq
 
@@ -454,6 +456,53 @@ def diff_compilers(qasm_string: str, ibm_device: str) -> str:
         ibm_device  : real IBM backend name (e.g. "ibm_fez")
     """
     return json.dumps(_diff_compilers(qasm_string, ibm_device), indent=2)
+
+
+@mcp.tool()
+def verify_stabilizer_circuit(qasm_string: str) -> str:
+    """
+    Checkable-structure verification, generalized: if a circuit is built
+    entirely from Clifford gates (H, S, CX, CZ, X, Y, Z, SWAP, ...) plus
+    measurements, its exact measurement distribution is computable via the
+    stabilizer tableau (Gottesman-Knill theorem) -- not simulated, not
+    estimated, exact, and polynomial-time regardless of qubit count.
+    Confirmed directly: a 150-qubit Clifford circuit (which state-vector
+    simulation could never touch — would need 2^150 amplitudes) verifies
+    in under a second here.
+
+    Generalizes run_ghz_parity_check (one hand-built example of this) into
+    the general case: any Clifford circuit gets this same free, exact
+    verification, not just GHZ.
+
+    Honestly reports inapplicable, not a guess, if the circuit contains
+    any non-Clifford gate (e.g. an arbitrary-angle RZ/RZZ/RX) — those
+    still need ideal_simulation/hardware_aware_simulation instead.
+
+    Args:
+        qasm_string : OpenQASM 2.0 circuit string
+    """
+    from core.verifier import _parse
+    circuit = _parse(qasm_string)
+    return json.dumps(_verify_stabilizer_circuit(circuit), indent=2)
+
+
+@mcp.tool()
+def verify_stabilizer_hardware_result(qasm_string: str, hw_counts: dict) -> str:
+    """
+    Verify real hardware measurement counts against a Clifford circuit's
+    EXACT stabilizer prediction — reports a real fidelity lower bound
+    (fraction of shots landing on an outcome that's actually possible
+    under the ideal case) at any qubit count, no simulation required.
+    Same logic run_ghz_parity_check already uses, generalized to any
+    Clifford circuit instead of only GHZ.
+
+    Args:
+        qasm_string : OpenQASM 2.0 circuit string (Clifford gates only)
+        hw_counts   : real measurement counts, e.g. {"000": 480, "111": 470, "010": 30}
+    """
+    from core.verifier import _parse
+    circuit = _parse(qasm_string)
+    return json.dumps(_verify_stabilizer_hardware_result(circuit, hw_counts), indent=2)
 
 
 @mcp.tool()

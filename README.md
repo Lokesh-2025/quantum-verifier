@@ -6,8 +6,8 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 
 | | |
 |---|---|
-| **Tools** | 39 |
-| **Tests** | 62, 60 passing (2 excluded — external IonQ/IBM account-state issues, not code bugs) |
+| **Tools** | 41 |
+| **Tests** | 68, 66 passing (2 excluded — external IonQ/IBM account-state issues, not code bugs) |
 | **Real bugs caught before they cost anything** | 4 |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
@@ -136,6 +136,8 @@ Plus the general-purpose device-intelligence, job-lifecycle, account/budget visi
 
 **`diff_compilers`** — multi-compiler diff engine (`core/multi_compiler.py`), Qiskit vs. TKET, IBM only. Every transpiler makes different, sometimes bad, silent compilation choices for the same target — this project already found one real instance (the RZZ→native-ZZ bug documented above). Converting a circuit between frameworks is itself a real bug surface, so neither compiler's output is trusted at face value: each is independently checked against the *original* circuit via exact unitary equivalence (correcting for real routing-induced qubit-layout permutation, not just gate count) before being compared or recommended. IonQ is out of scope for now — `pytket-ionq` has dependency conflicts with the `qiskit`/`qiskit-ionq` versions this project already depends on.
 
+**`verify_stabilizer_circuit` / `verify_stabilizer_hardware_result`** — checkable-structure verification, generalized (`core/stabilizer.py`). `run_ghz_parity_check` above is one hand-built example of a general fact: any circuit built entirely from Clifford gates (H, S, CX, CZ, X, Y, Z, SWAP, ...) plus measurements has an EXACT, classically-computable measurement distribution, no matter how many qubits it has (Gottesman-Knill theorem) — not simulated, a polynomial-time stabilizer-tableau computation. Confirmed directly: a 150-qubit Clifford circuit — which state-vector simulation could never touch, since it would need 2^150 amplitudes — verifies exactly in under a second here, and cross-checked against real state-vector simulation on a smaller, non-trivial circuit to confirm correctness, not just on the easy GHZ case. Honestly reports inapplicable, not a guess, for any circuit containing a non-Clifford gate (arbitrary-angle RZ/RZZ/RX, etc.) — those still need `ideal_simulation`/`hardware_aware_simulation` instead.
+
 ---
 
 ## How it works
@@ -164,7 +166,7 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 
 ---
 
-## Tools (39 total)
+## Tools (41 total)
 
 ### Core — the Verifier, control-experiment generator, robustness, and learning
 
@@ -179,6 +181,8 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 | `run_graph_coloring_search` | Checkable-structure graph-coloring oracle — O(edges) classical verification of amplified candidates |
 | `find_optimal_backend` | Cross-provider cost/quality comparison (IBM QPU-minutes + fidelity estimate vs. IonQ dollar range + noisy-simulation fidelity proxy), side by side |
 | `diff_compilers` | Qiskit vs. TKET compilation diff for a real IBM device — each result independently verified via exact unitary equivalence before being compared |
+| `verify_stabilizer_circuit` | Exact measurement distribution for any Clifford-only circuit via the stabilizer tableau — no simulation, scales to hundreds of qubits |
+| `verify_stabilizer_hardware_result` | Verifies real hardware counts against a Clifford circuit's exact prediction — real fidelity lower bound at any qubit count |
 
 ### IBM — device intelligence, job lifecycle, and account visibility
 
@@ -234,7 +238,8 @@ quantum-verifier/
 │   ├── intelligence.py        # recommend_tolerance — data-driven, on top of memory
 │   ├── templates.py           # checkable-structure experiment generators (GHZ, graph coloring)
 │   ├── optimal_backend.py     # find_optimal_backend — cross-provider cost/quality comparison
-│   └── multi_compiler.py      # diff_compilers — Qiskit vs TKET, IBM only, layout-verified
+│   ├── multi_compiler.py      # diff_compilers — Qiskit vs TKET, IBM only, layout-verified
+│   └── stabilizer.py          # verify_stabilizer_circuit — exact Clifford verification, any scale
 ├── providers/
 │   ├── ibm.py                 # device intelligence, job lifecycle, account/quota check
 │   └── ionq.py                # device listing, batched self-checked submission,
@@ -251,7 +256,8 @@ quantum-verifier/
 │   ├── test_intelligence.py         # recommend_tolerance
 │   ├── test_templates.py            # checkable-structure experiment generators
 │   ├── test_optimal_backend.py      # cross-provider cost/quality comparison
-│   └── test_multi_compiler.py       # Qiskit vs TKET diff, layout-verified
+│   ├── test_multi_compiler.py       # Qiskit vs TKET diff, layout-verified
+│   └── test_stabilizer.py           # exact Clifford verification, correctness + scale
 ├── experiment_memory.db        # local SQLite store, gitignored — Experiment Memory's data
 └── requirements.txt
 ```
@@ -264,7 +270,7 @@ quantum-verifier/
 pytest tests/
 ```
 
-62 tests across 9 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection (including the fixed-angle-native-gate threshold distinction between IonQ's tunable ZZ and IBM's fixed CZ/CX/ECR), wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect **on both IonQ and IBM**, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates, `find_optimal_backend` correctly reporting each provider's real cost/quality signal in its own units, and `diff_compilers` correctly verifying both Qiskit's and TKET's real IBM-targeted compilations against the original circuit. All simulator-only, transpile-only, or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above). 2 tests fail for reasons external to this code (an IonQ account-side shot-limit quirk and an IBM account-quota-state boundary case) — confirmed via `git diff` that neither touched file was modified this session.
+68 tests across 10 files — endianness/angle-unit canaries, semantic and topology BLOCK cases, gate-synthesis inflation detection (including the fixed-angle-native-gate threshold distinction between IonQ's tunable ZZ and IBM's fixed CZ/CX/ECR), wrong-measurement-basis detection, false-claim BLOCK / true-claim GO, real research circuits passing their independently-verified predictions, the control-experiment generator correctly isolating a real entangling effect **on both IonQ and IBM**, a side-by-side diff against the original tool, `find_robust_circuit` correctly picking the genuinely better of two candidates, IonQ/IBM account and budget/quota preflight checks (both the allow and refuse paths, against real accounts), `recommend_tolerance` correctly recovering a controlled, known error rate, the checkable-structure templates (GHZ parity, graph coloring) correctly classifying both ideal and hand-crafted noisy/invalid candidates, `find_optimal_backend` correctly reporting each provider's real cost/quality signal in its own units, `diff_compilers` correctly verifying both Qiskit's and TKET's real IBM-targeted compilations against the original circuit, and `verify_stabilizer_circuit` correctly matching real state-vector simulation on a non-trivial circuit while scaling to 150 qubits where state-vector simulation is impossible. All simulator-only, transpile-only, or read-only account checks — zero real hardware credits spent building or verifying this test suite itself (separately, this project's actual first real hardware run is documented above). 2 tests fail for reasons external to this code (an IonQ account-side shot-limit quirk and an IBM account-quota-state boundary case) — confirmed via `git diff` that neither touched file was modified this session.
 
 `test_side_by_side_old_repo.py` needs `quantum-hardware-mcp` cloned as a sibling directory (`~/quantum-hardware-mcp`) with its own dependencies installed, since it imports that repo directly to diff against it.
 
@@ -329,6 +335,7 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] IBM hardware-aware simulation as a full noisy simulation, not just a fidelity estimate — didn't need IBM's public API to expose a named noise model after all; `qiskit_aer.noise.NoiseModel.from_backend` builds one locally from the backend's own real, live calibration data, for free, no QPU time spent. This is what actually closed the `falsify_claim` gap above — IBM now returns real counts, not just a single fidelity number
 - [x] Real-connectivity check against `ibm_fez`'s actual coupling map (not assumed from heavy-hex's max degree alone) — confirmed zero triangles exist anywhere on the chip, meaning a densely-connected circuit family (this project's own `degree3` E1 circuit, which needs two triangles) cannot map onto IBM without SWAP injection, regardless of qubit choice. Caught before spending any real QPU time on a confounded comparison
 - [x] Fixed a false-failure in `gate_synthesis_check` for fixed-angle native two-qubit gates (CZ, CX, ECR): an arbitrary-angle `rzz` needs exactly 2 of them (sandwich a single-qubit RZ between two copies) — the correct, minimal, unavoidable decomposition, confirmed directly against `ibm_fez`'s real basis, not inflation. The 1.5x threshold was implicitly calibrated around IonQ's *tunable* native ZZ gate (where 1:1 is achievable) and was flagging IBM's correct, optimal result as a false BLOCK. Now detects the native gate family and applies a 2.5x threshold for fixed-angle gates — found and fixed while selecting real qubits for the actual IBM experiment, before it could incorrectly block a real submission
+- [x] `verify_stabilizer_circuit` / `verify_stabilizer_hardware_result` (`core/stabilizer.py`) — generalizes `run_ghz_parity_check`'s trick (checkable at any qubit count, zero simulation) to any Clifford-only circuit via the stabilizer tableau, not just GHZ. Confirmed exact match against real state-vector simulation on a non-trivial circuit (not just the easy GHZ case), and confirmed it scales to 150 qubits — verified in under a second, where state-vector simulation would need 2^150 amplitudes and is simply impossible
 
 **Next**
 - [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bugs are fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
