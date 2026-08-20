@@ -53,6 +53,13 @@ HEAVY_HEX_MAX_DEGREE = 3
 # silently produced a wrong "hardware-aware simulation" for any circuit
 # containing rzz — caught via the free-simulator control-arm check for the
 # Forte angle-error experiment before it ever reached real hardware.
+#
+# RXX and RYY were checked for the same pattern and do NOT have it: an
+# isolated rxx/ryy against IonQ's real native basis showed extra gpi/gpi2
+# gates too, but that's the real, unavoidable cost of basis-change gates
+# (H, S) on this hardware -- confirmed directly, a bare isolated H alone
+# already costs 2 gpi2 + 1 gpi, and RXX needs 4 of them, exactly accounting
+# for the total seen. Not a missing equivalence; no fix needed or applied.
 def _register_ionq_native_equivalences():
     try:
         from qiskit_ionq.ionq_gates import ZZGate as _IonQZZGate
