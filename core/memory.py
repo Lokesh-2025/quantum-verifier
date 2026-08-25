@@ -175,3 +175,73 @@ def memory_summary(provider: str = None) -> dict:
                 "this tool's predictions have been more trustworthy for that provider/device so far. "
                 "Small sample sizes should be read with real caution, not treated as settled.",
     }
+
+
+def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> dict:
+    """
+    Added 2026-08-24. memory_summary() answers "how far off were my
+    predictions" (continuous error). This answers the more direct,
+    real-world question: "when this tool's verdict would have said GO,
+    how often was that actually right?" — a real, honest hit rate from
+    real recorded prediction-vs-reality pairs, not a claimed one.
+
+    A prediction "would have been GO" if the real result actually landed
+    within `tolerance` of the prediction (same relative-tolerance logic
+    core.verifier.ground_truth_check uses at verification time — pass the
+    same tolerance you actually verify with for an apples-to-apples number).
+
+    NOTE: only providers/ionq.py currently logs predictions here
+    automatically (ionq_submit_job / ionq_job_results). IBM's submit_job
+    does not yet — so this track record is IonQ-only in practice until
+    that's added, and this function says so explicitly rather than
+    silently reporting a partial number as if it were complete.
+    """
+    conn = _connect()
+    query = ("SELECT provider, target_device, predicted_amplification, real_amplification "
+              "FROM predictions WHERE real_amplification IS NOT NULL AND predicted_amplification IS NOT NULL")
+    params = ()
+    if provider:
+        query += " AND provider = ?"
+        params = (provider,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    if not rows:
+        return {
+            "n": 0,
+            "note": "No predictions with both a predicted and real amplification recorded yet.",
+        }
+
+    by_device = {}
+    for prov, device, predicted, real in rows:
+        key = f"{prov}/{device}"
+        by_device.setdefault(key, []).append((predicted, real))
+
+    def _hit_rate(pairs):
+        hits = 0
+        for predicted, real in pairs:
+            lo, hi = predicted * (1 - tolerance), predicted * (1 + tolerance)
+            if lo <= real <= hi:
+                hits += 1
+        return hits, len(pairs)
+
+    breakdown = {}
+    total_hits, total_n = 0, 0
+    for key, pairs in by_device.items():
+        hits, n = _hit_rate(pairs)
+        total_hits += hits
+        total_n += n
+        breakdown[key] = {"n": n, "hits": hits, "hit_rate": round(hits / n, 3) if n else None}
+
+    return {
+        "tolerance_used": tolerance,
+        "overall_n": total_n,
+        "overall_hit_rate": round(total_hits / total_n, 3) if total_n else None,
+        "by_provider_device": breakdown,
+        "scope_caveat": "Only providers/ionq.py logs predictions here automatically as of "
+                         "2026-08-24 — IBM's submit_job does not yet, so this is an IonQ-only "
+                         "track record in practice, not a full-tool one. Treat it as that.",
+        "note": f"A 'hit' means the real result landed within {int(tolerance*100)}% of the "
+                "prediction — the same logic that would have produced a GO verdict at "
+                "verification time. This is the tool's own real accuracy record, not a claim.",
+    }

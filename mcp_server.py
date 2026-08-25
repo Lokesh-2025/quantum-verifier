@@ -13,6 +13,7 @@ from core.verifier import verify as _verify
 from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
+from core.memory import verdict_track_record as _verdict_track_record
 from core.intelligence import recommend_tolerance as _recommend_tolerance
 from core.templates import run_ghz_parity_check as _run_ghz_parity_check
 from core.templates import run_graph_coloring_search as _run_graph_coloring_search
@@ -187,6 +188,18 @@ def best_qubits(device_name: str, n: int = 5) -> str:
 
 
 @mcp.tool()
+def best_qubits_for_reproducibility(device_name: str, n: int = 5, min_history: int = 3) -> str:
+    """
+    Like best_qubits, but favors STABLE qubits over momentarily-good ones —
+    for start_repro_experiment/repro_score, where you compare the same
+    circuit across multiple real runs over time. Uses real per-qubit T1
+    history; qubits with fewer than min_history real readings are marked
+    low_confidence rather than assumed stable. Added 2026-08-24.
+    """
+    return json.dumps(ibm.best_qubits_for_reproducibility(device_name, n, min_history), indent=2)
+
+
+@mcp.tool()
 def compare_devices(sort_by: str = "cx_error") -> str:
     """Rank IBM devices by cx_error, queue, qubits, or combined score."""
     return json.dumps(ibm.compare_devices(sort_by), indent=2)
@@ -218,7 +231,7 @@ def device_on_date(device_name: str, date: str) -> str:
 
 @mcp.tool()
 def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2,
-                initial_layout: list = None) -> str:
+                initial_layout: list = None, confirm_despite_drift_alert: bool = False) -> str:
     """
     Compile and submit a circuit to an IBM quantum computer. Prefer calling
     verify_experiment first.
@@ -229,8 +242,12 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
         submission uses a specific, already-verified qubit selection
         (e.g. confirmed low-error, confirmed SWAP-free for this circuit)
         instead of trusting the transpiler to pick the same one again.
+    confirm_despite_drift_alert : must be True to submit anyway if this
+        device had a real calibration alert (T1/T2 drop, cx/readout error
+        spike) in the last 24 hours — checked automatically every call.
     """
-    return json.dumps(ibm.submit_job(device_name, qasm_string, shots, qasm_version, initial_layout), indent=2)
+    return json.dumps(ibm.submit_job(device_name, qasm_string, shots, qasm_version,
+                                      initial_layout, confirm_despite_drift_alert), indent=2)
 
 
 @mcp.tool()
@@ -562,6 +579,44 @@ def memory_summary(provider: str = None) -> str:
     be read with real caution.
     """
     return json.dumps(_memory_summary(provider), indent=2)
+
+
+@mcp.tool()
+def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> str:
+    """
+    A real, honest hit rate: when this tool's verdict would have said GO
+    (real result landed within `tolerance` of the prediction), how often
+    was that actually true — computed from real recorded prediction-vs-
+    reality pairs. Currently IonQ-only in practice (only ionq_submit_job
+    logs predictions automatically); the response says so explicitly.
+    """
+    return json.dumps(_verdict_track_record(tolerance, provider), indent=2)
+
+
+@mcp.tool()
+def check_chip_identity(device_name: str, compare_days_back: int = 7) -> str:
+    """
+    Detects a silent hardware swap or qubit relabeling via real per-qubit
+    fingerprint correlation — ported from quantum-hardware-mcp 2026-08-24.
+    Uses a PROVISIONAL fixed threshold (this project's per-qubit archive
+    is too new for a real gap-calibrated baseline yet); the response says
+    so explicitly. Requires at least two get_device_details calls, days
+    apart, to have real history to compare.
+    """
+    return json.dumps(ibm.check_chip_identity(device_name, compare_days_back), indent=2)
+
+
+@mcp.tool()
+def audit_calibration_telemetry(device_name: str) -> str:
+    """
+    Audits whether a device's calibration DATA looks like real
+    measurements, not whether the device is healthy — frozen values,
+    suspicious round-number placeholders, T2>2*T1 physics violations, and
+    per-qubit copy-paste. Generalizes the exact bug class that caused this
+    project's own calibration history to be silently null for 72 rows
+    into a reusable, ongoing check. Added 2026-08-24.
+    """
+    return json.dumps(ibm.audit_calibration_telemetry(device_name), indent=2)
 
 
 @mcp.tool()

@@ -410,6 +410,67 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
     }
 
 
+def cross_check_fidelity_estimate(circuit: QuantumCircuit, hw_result: dict, shots: int = 4096) -> dict:
+    """
+    Independent second opinion on IBM's noise estimate, added 2026-08-24 —
+    the same "don't trust one method, check it against an independent one"
+    principle falsify_claim already applies to circuits (real vs control)
+    and diff_compilers already applies across compilers (Qiskit vs TKET),
+    applied one level deeper: to hardware_aware_simulation's own noise
+    estimate. That function already computes TWO independent signals for
+    IBM (an analytical product-of-gate-errors estimate, and a full local
+    noisy Aer simulation) but never compared them to each other — this
+    does that comparison.
+
+    Overlap-based fidelity proxy: sum of min(ideal_prob, noisy_prob) per
+    bitstring, a standard classical distributional-overlap measure,
+    compared against the analytical estimated_fidelity. A real,
+    substantial disagreement between two independently-computed numbers
+    is a genuine signal something's off — either the noise model, the
+    calibration data behind it, or the analytical approximation's
+    assumptions don't hold for this specific circuit.
+
+    Informational only (does not BLOCK) — this is the newest, least
+    battle-tested check in the pipeline; flagging a real disagreement is
+    more useful right now than silently deciding it's always right.
+    """
+    if hw_result.get("counts") is None or hw_result.get("estimated_fidelity") is None:
+        return {"applicable": False, "note": "Needs both a full noisy simulation and an "
+                                              "analytical estimate — at least one is missing "
+                                              "(see hardware_aware_simulation's own error/note)."}
+
+    ideal = ideal_simulation(circuit, shots)
+    ideal_total = ideal["total_shots"]
+    ideal_probs = {b: c / ideal_total for b, c in ideal["counts"].items()} if ideal_total else {}
+
+    noisy_counts = hw_result["counts"]
+    noisy_total = sum(noisy_counts.values())
+    noisy_probs = {b: c / noisy_total for b, c in noisy_counts.items()} if noisy_total else {}
+
+    overlap = sum(min(ideal_probs.get(b, 0.0), noisy_probs.get(b, 0.0))
+                  for b in set(ideal_probs) | set(noisy_probs))
+
+    analytical = hw_result["estimated_fidelity"]
+    disagreement = abs(overlap - analytical)
+    significant = disagreement > 0.25  # both are 0-1 fidelity-like quantities
+
+    return {
+        "applicable": True,
+        "analytical_estimate": analytical,
+        "simulated_overlap_fidelity": round(overlap, 4),
+        "disagreement": round(disagreement, 4),
+        "significant_disagreement": significant,
+        "verdict": (
+            f"Analytical estimate ({analytical}) and the real noisy simulation's overlap "
+            f"({round(overlap, 4)}) disagree by {round(disagreement, 4)} — worth investigating "
+            "before trusting either number for this circuit."
+            if significant else
+            f"Analytical estimate ({analytical}) and the real noisy simulation's overlap "
+            f"({round(overlap, 4)}) are consistent — two independently-computed methods agree."
+        ),
+    }
+
+
 # ---------------------------------------------------------------- step 5
 def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
                         expected_amplification: float, tolerance: float = 0.5) -> dict:
@@ -432,6 +493,64 @@ def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
                     f"Claimed signal ({expected_amplification}x) is NOT distinguishable from "
                     f"hardware-predicted behavior ({round(observed_amp, 2)}x) — the experiment "
                     "cannot currently support this claim."),
+    }
+
+
+def required_shots_check(n_marked: int, expected_amplification: float, n_qubits: int,
+                          requested_shots: int, confidence: float = 0.95, power: float = 0.80) -> dict:
+    """
+    Real, concrete answer to "could this claim ever be distinguishable from
+    noise at the shots I'm about to request" — computed BEFORE any real
+    hardware time is spent, not discovered after an inconclusive result
+    already cost money. Added 2026-08-24.
+
+    Standard two-proportion sample-size formula: null hypothesis is the
+    uniform/no-real-effect probability of landing on a marked bitstring
+    (p0 = n_marked / 2**n_qubits); the claim is that entanglement/the
+    circuit's real structure pushes that to p1 = expected_amplification * p0.
+    Computes the minimum shots needed to separate p0 from p1 at the given
+    confidence (Type I error) and power (Type II error, 1 - false-negative
+    rate), then compares against what was actually requested.
+    """
+    from scipy.stats import norm
+
+    p0 = n_marked / (2 ** n_qubits)
+    p1 = min(expected_amplification * p0, 1.0)
+
+    if p1 <= p0:
+        return {
+            "applicable": False,
+            "note": f"expected_amplification={expected_amplification}x implies no real effect "
+                    f"over the {round(p0, 6)} baseline — a power check doesn't apply the same way "
+                    "to a claim of 'no improvement'.",
+        }
+
+    z_alpha = norm.ppf(1 - (1 - confidence) / 2)
+    z_beta = norm.ppf(power)
+    pbar = (p0 + p1) / 2
+    numerator = (z_alpha * math.sqrt(2 * pbar * (1 - pbar))
+                 + z_beta * math.sqrt(p0 * (1 - p0) + p1 * (1 - p1)))
+    required_shots = math.ceil((numerator / (p1 - p0)) ** 2)
+    passed = requested_shots >= required_shots
+
+    return {
+        "applicable": True,
+        "null_hypothesis_probability": round(p0, 6),
+        "claimed_probability": round(p1, 6),
+        "required_shots": required_shots,
+        "requested_shots": requested_shots,
+        "confidence": confidence,
+        "power": power,
+        "passed": passed,
+        "verdict": (
+            f"{requested_shots} shots is enough to distinguish this claim from noise "
+            f"({required_shots} required at {int(confidence*100)}% confidence, {int(power*100)}% power)."
+            if passed else
+            f"{requested_shots} shots is NOT enough — this claim cannot be reliably distinguished "
+            f"from noise even if it's completely true. Needs at least {required_shots} shots at "
+            f"{int(confidence*100)}% confidence, {int(power*100)}% power. Running this experiment "
+            "as requested risks an inconclusive result regardless of what the hardware actually did."
+        ),
     }
 
 
@@ -475,6 +594,14 @@ def verify(
                 "reason": "Topology check failed — real routing overhead expected.",
                 "details": topo}
 
+    if expected_marked_bitstrings and expected_amplification is not None:
+        power_check = required_shots_check(
+            len(expected_marked_bitstrings), expected_amplification, circuit.num_qubits, shots,
+        )
+        result["required_shots_check"] = power_check
+        if power_check["applicable"] and not power_check["passed"]:
+            return {**result, "verdict": "BLOCK", "reason": power_check["verdict"]}
+
     ideal = ideal_simulation(circuit, shots)
     result["ideal_simulation"] = {"total_shots": ideal["total_shots"],
                                    "top_outcomes": dict(sorted(ideal["counts"].items(), key=lambda x: -x[1])[:5])}
@@ -491,6 +618,9 @@ def verify(
                            "the target's native gateset, likely a missing gate equivalence rather "
                            "than real hardware overhead.",
                 "details": gsc}
+
+    if provider == "ibm":
+        result["fidelity_cross_check"] = cross_check_fidelity_estimate(circuit, hw, shots)
 
     if expected_marked_bitstrings and expected_amplification is not None:
         gt = ground_truth_check(hw.get("counts"), expected_marked_bitstrings,
