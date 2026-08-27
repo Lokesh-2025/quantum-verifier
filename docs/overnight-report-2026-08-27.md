@@ -274,3 +274,16 @@ No current caller collapses `applicable: false` with `INCONCLUSIVE`. `verify()` 
 7. **Tomorrow's bigger question, unrelated to tonight but still open** — which of the 6 deferred ideas to prioritize, and the two pre-registration commitments (graduation threshold; what happens if the mutation study says the new test isn't better).
 8. **The schema-drift systemic finding** — build Option B (loud startup schema-version check) first, Option A (real migration mechanism) later, something else, or leave `CREATE TABLE IF NOT EXISTS` as-is and accept the risk?
 9. **Task 1's anti-conservative boundary result** — factor into tomorrow's graduation-criteria discussion how, if at all?
+
+---
+
+## Decisions made after this report, by the human
+
+**DECIDED 2026-08-27 (late, low-stakes, reversible):**
+- Schema drift: Option B first (loud startup schema-version check), Option A later.
+- The three mundane-explanations checks stay standalone/informational — not wired into `verify()` as blocking. Nothing graduates to blocking without measurement.
+
+**STILL OPEN (deliberately deferred — require a clear head and the report):**
+- The two pre-registration commitments.
+- Task 4's design shape.
+- Whether/how the anti-conservative boundary result factors into graduation criteria.
