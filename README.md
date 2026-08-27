@@ -6,9 +6,9 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 
 | | |
 |---|---|
-| **Tools** | 41 |
-| **Tests** | 68, 66 passing (2 excluded — external IonQ/IBM account-state issues, not code bugs) |
-| **Real bugs caught before they cost anything** | 4 |
+| **Tools** | 48 |
+| **Tests** | 177, 173 passing (4 xfailed — external IonQ/IBM account-state issues, not code bugs) |
+| **Real bugs caught before they cost anything** | 4 (pre-2026-08-27 count; several more found since — see overnight report, not yet re-tallied) |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
 | **Postmortems** | [POSTMORTEMS.md](POSTMORTEMS.md) — real incidents in this project's own tooling, written up honestly |

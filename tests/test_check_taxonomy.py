@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import core.verifier as v
 
-VALID_KINDS = {"structural", "statistical", "heuristic"}
+VALID_KINDS = {"structural", "statistical", "heuristic", "mundane_explanation"}
 
 
 def test_every_entry_has_a_valid_kind():

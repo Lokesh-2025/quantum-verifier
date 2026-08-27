@@ -679,6 +679,196 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
     return result
 
 
+# ---------------------------------------------------------------- mundane explanations
+#
+# Added 2026-08-27 (overnight, autonomous, per the six-task prompt's Task 5).
+# Not statistical checks -- boring, non-quantum explanations for an apparent
+# failure, checked BEFORE concluding hardware/noise/entanglement did
+# something surprising. Each one below was verified against a real,
+# reproduced bug scenario before being written, not assumed to be a real
+# failure mode.
+
+
+def detect_reversed_bitstring_convention(expected_marked_bitstrings: list, hw_counts: dict) -> dict:
+    """
+    A mundane-explanations check, not a quantum one. Qiskit's bitstring
+    convention places qubit 0 as the RIGHTMOST character (least
+    significant), not the leftmost -- the opposite of a naive "string
+    index == qubit index" assumption. Confirmed by direct reproduction
+    before writing this: an X gate on qubit 0 alone (qubit 1 left at |0>)
+    on a real AerSimulator run produces the counts key "01", never "10".
+
+    This is a real, common, entirely non-quantum bug: someone writes
+    expected_marked_bitstrings assuming the wrong bit order, the real
+    experiment then looks like it "failed" (near-zero match against real
+    counts), and the boring explanation (bit order, not entanglement or
+    noise or a broken circuit) never gets checked before concluding
+    something quantum went wrong.
+
+    Detects it by comparing the match rate against the CLAIMED bitstrings
+    vs their bit-reversed counterparts, against the same real counts. If
+    the reversed version matches dramatically better, that's a real,
+    checkable signal of exactly this mistake -- not proof (some circuits
+    are genuinely close either way by chance), so this is informational,
+    not a block.
+
+    Deliberately conservative about false alarms: palindromic bitstrings
+    (where reversed == claimed, e.g. "0110") are skipped entirely -- there
+    is nothing to detect when the two orientations are identical.
+    """
+    if not hw_counts or not expected_marked_bitstrings:
+        return {"applicable": False, "note": "No counts or no claimed bitstrings — nothing to check."}
+    total = sum(hw_counts.values())
+    if total == 0:
+        return {"applicable": False, "note": "Zero total shots — nothing to check."}
+
+    claimed = set(expected_marked_bitstrings)
+    reversed_claimed = set(b[::-1] for b in expected_marked_bitstrings)
+    if claimed == reversed_claimed:
+        return {"applicable": False,
+                "note": "Claimed bitstring(s) are palindromic — reversed convention would "
+                        "produce an identical claim, nothing to distinguish."}
+
+    claimed_shots = sum(c for b, c in hw_counts.items() if b in claimed)
+    reversed_shots = sum(c for b, c in hw_counts.items() if b in reversed_claimed)
+    claimed_rate = claimed_shots / total
+    reversed_rate = reversed_shots / total
+
+    suspicious = (reversed_rate > claimed_rate * 3) and (reversed_rate > 0.5)
+
+    return {
+        "applicable": True,
+        "kind": "mundane_explanation",
+        "claimed_match_rate": round(claimed_rate, 4),
+        "reversed_match_rate": round(reversed_rate, 4),
+        "suspected_reversed_bit_order": suspicious,
+        "verdict": (
+            f"SUSPICIOUS: the bit-reversed version of the claimed marked bitstring(s) matches "
+            f"{round(reversed_rate*100, 1)}% of shots, vs only {round(claimed_rate*100, 1)}% for "
+            "the claim as written. Classic signature of Qiskit's bit-ordering convention "
+            "(qubit 0 is the RIGHTMOST character, not the leftmost) applied backwards — check "
+            "bit order before concluding the hardware or circuit failed."
+            if suspicious else
+            "No sign of reversed bit ordering — claimed and reversed match rates don't show "
+            "the lopsided pattern convention confusion would produce."
+        ),
+    }
+
+
+def detect_suspicious_register_mapping(circuit: QuantumCircuit) -> dict:
+    """
+    A mundane-explanations check. Qiskit lets measure(qubit, clbit) map any
+    qubit to any classical bit -- `measure q[0] -> c[1]; measure q[1] -> c[0]`
+    is completely legal QASM. If a circuit's measurement mapping isn't the
+    trivial 1:1 identity (qubit i always measured into clbit i), then
+    reading the resulting bitstring as if position i always meant "qubit i"
+    silently misattributes every result to the wrong physical qubit --
+    no error, no crash, just quietly wrong conclusions about which qubit
+    did what.
+
+    This doesn't mean a non-identity mapping is wrong -- it can be entirely
+    deliberate (routing, layout-driven remapping). It means anyone reading
+    the bitstring needs to know the real mapping, not assume the trivial
+    one. This surfaces the real mapping so that assumption gets checked
+    instead of silently made.
+    """
+    measure_pairs = []
+    for instruction in circuit.data:
+        if instruction.operation.name == "measure":
+            qubit_idx = circuit.find_bit(instruction.qubits[0]).index
+            clbit_idx = circuit.find_bit(instruction.clbits[0]).index
+            measure_pairs.append((qubit_idx, clbit_idx))
+
+    if not measure_pairs:
+        return {"applicable": False, "note": "No measurement instructions found."}
+
+    is_identity = all(q == c for q, c in measure_pairs)
+    duplicate_clbits = len(set(c for _, c in measure_pairs)) < len(measure_pairs)
+
+    return {
+        "applicable": True,
+        "kind": "mundane_explanation",
+        "measure_mapping": sorted(measure_pairs),
+        "is_identity_mapping": is_identity,
+        "multiple_qubits_share_a_clbit": duplicate_clbits,
+        "verdict": (
+            "Multiple qubits are measured into the SAME classical bit — a later measurement "
+            "silently overwrites an earlier one for that bit. Almost certainly not what was "
+            "intended; check the circuit before trusting any per-qubit conclusion from it."
+            if duplicate_clbits else
+            f"Non-trivial qubit->clbit mapping: {sorted(measure_pairs)}. Not necessarily wrong "
+            "(routing/layout can cause this deliberately), but reading bitstring position i as "
+            "'qubit i' would be WRONG here — use this real mapping instead."
+            if not is_identity else
+            "Identity mapping (qubit i -> clbit i for every measurement) — reading bitstring "
+            "position i as qubit i is safe for this circuit."
+        ),
+    }
+
+
+def detect_stale_job_result(hw_counts: dict, expected_total_shots: int, circuit_hash: str = None,
+                             previously_seen_hashes: dict = None) -> dict:
+    """
+    A mundane-explanations check. A cached or stale job result -- a result
+    object that looks valid (real counts, right shape) but actually
+    reflects a DIFFERENT circuit or a DIFFERENT shot count than the one
+    that was supposedly just run -- is a boring, real, non-quantum
+    explanation for a result that doesn't match a claim, and is easy to
+    miss because nothing about the result LOOKS malformed.
+
+    Two independent, cheap sanity checks, both catchable from data already
+    on hand (no new hardware calls needed):
+
+    1. Shot-count mismatch: do the real counts actually sum to the shot
+       count that was supposedly requested? A mismatch is a concrete,
+       checkable sign the result doesn't belong to this request.
+    2. Repeat-hash detection: has this EXACT circuit_hash been seen before
+       (via previously_seen_hashes, a caller-supplied {hash: count} map --
+       e.g. sourced from the real prediction/comparison logs) an
+       implausible number of times in a way that suggests a cached
+       response is being replayed rather than a fresh submission?
+       Informational only (repeats can be entirely legitimate -- the same
+       circuit run deliberately more than once) -- surfaced, not blocked.
+    """
+    if not hw_counts:
+        return {"applicable": False, "note": "No counts to check."}
+
+    actual_total = sum(hw_counts.values())
+    shot_count_matches = actual_total == expected_total_shots
+
+    repeat_count = None
+    if circuit_hash is not None and previously_seen_hashes is not None:
+        repeat_count = previously_seen_hashes.get(circuit_hash, 0)
+
+    issues = []
+    if not shot_count_matches:
+        issues.append(
+            f"Real counts sum to {actual_total} shots, but {expected_total_shots} were "
+            "requested — this result may not belong to this request at all (stale/cached "
+            "response, or a mismatched job lookup), not a hardware problem."
+        )
+    if repeat_count is not None and repeat_count >= 3:
+        issues.append(
+            f"This exact circuit has been seen {repeat_count} times before in the recorded "
+            "history — worth confirming this is a deliberate repeat, not an accidentally "
+            "replayed/cached result."
+        )
+
+    return {
+        "applicable": True,
+        "kind": "mundane_explanation",
+        "shot_count_matches": shot_count_matches,
+        "actual_total_shots": actual_total,
+        "expected_total_shots": expected_total_shots,
+        "repeat_count": repeat_count,
+        "issues": issues,
+        "verdict": (
+            " ".join(issues) if issues else
+            "No sign of a stale or mismatched result — shot count matches what was requested."
+        ),
+    }
+
+
 def required_shots_check(n_marked: int, expected_amplification: float, n_qubits: int,
                           requested_shots: int, confidence: float = 0.95, power: float = 0.80) -> dict:
     """
@@ -975,6 +1165,32 @@ CHECK_TAXONOMY = {
                       "test behind it yet. Same gap ground_truth_check had "
                       "before ground_truth_significance_test was built; "
                       "not yet fixed the same way.",
+    },
+    "detect_reversed_bitstring_convention": {
+        "kind": "mundane_explanation",
+        "rationale": "Not a check on the circuit or the hardware -- a check "
+                      "on whether the CLAIM itself was built with a common, "
+                      "entirely non-quantum mistake (Qiskit's bit-ordering "
+                      "convention applied backwards). Standalone, informational "
+                      "only -- not yet wired into verify()'s automatic pipeline.",
+    },
+    "detect_suspicious_register_mapping": {
+        "kind": "mundane_explanation",
+        "rationale": "Surfaces the real qubit->clbit measurement mapping so "
+                      "a non-identity mapping (legal, sometimes deliberate, "
+                      "but silently misleading if assumed trivial) gets "
+                      "checked rather than assumed. Standalone, informational "
+                      "only -- not yet wired into verify()'s automatic pipeline.",
+    },
+    "detect_stale_job_result": {
+        "kind": "mundane_explanation",
+        "rationale": "Catches a result that looks valid but doesn't actually "
+                      "belong to the request it claims to (shot-count "
+                      "mismatch, implausible repeat count) -- boring "
+                      "explanations for a bad-looking result that have "
+                      "nothing to do with hardware or the circuit. "
+                      "Standalone, informational only -- not yet wired into "
+                      "verify()'s automatic pipeline.",
     },
 }
 
