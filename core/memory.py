@@ -51,9 +51,19 @@ def _connect():
             provider TEXT NOT NULL,
             target_device TEXT NOT NULL,
             circuit_hash TEXT NOT NULL,
-            old_check_within_tolerance INTEGER,
-            new_check_equivalent_at_alpha INTEGER,
-            new_check_p_value REAL,
+            total_shots INTEGER NOT NULL,
+            marked_shots INTEGER NOT NULL,
+            claimed_probability REAL NOT NULL,
+            equivalence_margin_lower REAL NOT NULL,
+            equivalence_margin_upper REAL NOT NULL,
+            alpha REAL NOT NULL,
+            ci_lower REAL NOT NULL,
+            ci_upper REAL NOT NULL,
+            ci_method TEXT NOT NULL,
+            p_value REAL NOT NULL,
+            tost_verdict TEXT NOT NULL,
+            old_check_within_tolerance INTEGER NOT NULL,
+            old_check_tolerance_used REAL,
             agree INTEGER NOT NULL
         )
     """)
@@ -261,7 +271,8 @@ def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> dict:
 
 
 def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string: str,
-                                   old_check: dict, new_check: dict) -> None:
+                                   old_check: dict, new_check: dict,
+                                   old_check_tolerance: float = None) -> None:
     """
     Added 2026-08-27, per external review's item 4 — called the "cheapest
     thing on the list and probably the most informative." Every time
@@ -272,6 +283,23 @@ def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string
     result to be useful — it's comparing two checks against each other,
     both already computed from the same simulated/hardware-aware result.
 
+    SCHEMA REWRITTEN 2026-08-27 (second review pass) after a real gap was
+    caught before any real data existed to lose: the first version logged
+    only a boolean agree/disagree flag per comparison. That makes it
+    impossible to ever recompute a verdict under a different alpha, a
+    different tolerance margin, or a different CI method later — exactly
+    the kind of re-analysis this log exists to eventually support. Now
+    logs the raw counts (total_shots, marked_shots) and every real
+    statistical quantity (claimed probability, equivalence margin, CI
+    bounds/method, p-value, TOST verdict) needed to recompute the verdict
+    from scratch with different parameters, not just replay this one.
+
+    job_id and circuit layout are NOT logged — verify() runs pre-
+    submission, before either exists yet, so there's nothing real to put
+    there. An honest scope boundary, not an oversight: this is a record of
+    the pre-submission simulation/hardware-aware pass, not a live-hardware
+    job record.
+
     Silently no-ops if either check wasn't applicable — nothing to compare.
     """
     if not (old_check.get("applicable") and new_check.get("applicable")):
@@ -280,14 +308,20 @@ def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string
     import datetime
     old_verdict = old_check["within_tolerance"]
     new_verdict = new_check["equivalent_at_alpha"]
+    margin = new_check["equivalence_margin"]
+    ci = new_check["confidence_interval"]
     conn = _connect()
     conn.execute(
         "INSERT INTO shadow_mode_comparisons (timestamp, provider, target_device, circuit_hash, "
-        "old_check_within_tolerance, new_check_equivalent_at_alpha, new_check_p_value, agree) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "total_shots, marked_shots, claimed_probability, equivalence_margin_lower, "
+        "equivalence_margin_upper, alpha, ci_lower, ci_upper, ci_method, p_value, tost_verdict, "
+        "old_check_within_tolerance, old_check_tolerance_used, agree) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (datetime.datetime.now(datetime.timezone.utc).isoformat(), provider, target_device,
-         _circuit_hash(qasm_string), int(old_verdict), int(new_verdict),
-         new_check["p_value"], int(old_verdict == new_verdict)),
+         _circuit_hash(qasm_string), new_check["total_shots"], new_check["marked_shots"],
+         new_check["claimed_probability"], margin["lower"], margin["upper"], new_check["alpha"],
+         ci["lower"], ci["upper"], ci["method"], new_check["p_value"], new_check["tost_verdict"],
+         int(old_verdict), old_check_tolerance, int(old_verdict == new_verdict)),
     )
     conn.commit()
     conn.close()
@@ -298,25 +332,33 @@ def shadow_mode_disagreement_log(limit: int = 50) -> dict:
     Read back the shadow-mode comparison log. The whole point of shadow
     mode is reviewing this after real experiments accumulate — this
     doesn't recommend anything on its own, it just surfaces the raw
-    disagreements so a human can look at them and decide whether the new
-    equivalence test or the old tolerance band was right, case by case.
+    disagreements (with full raw counts and statistical detail, not just a
+    flag) so a human can look at them, re-derive the verdict under
+    different parameters if needed, and decide whether the new equivalence
+    test or the old tolerance band was right, case by case.
     """
     conn = _connect()
     total = conn.execute("SELECT COUNT(*) FROM shadow_mode_comparisons").fetchone()[0]
     disagreements = conn.execute(
-        "SELECT timestamp, provider, target_device, circuit_hash, old_check_within_tolerance, "
-        "new_check_equivalent_at_alpha, new_check_p_value FROM shadow_mode_comparisons "
-        "WHERE agree = 0 ORDER BY id DESC LIMIT ?", (limit,)
+        "SELECT timestamp, provider, target_device, circuit_hash, total_shots, marked_shots, "
+        "claimed_probability, equivalence_margin_lower, equivalence_margin_upper, alpha, "
+        "ci_lower, ci_upper, ci_method, p_value, tost_verdict, old_check_within_tolerance, "
+        "old_check_tolerance_used FROM shadow_mode_comparisons WHERE agree = 0 "
+        "ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
     conn.close()
 
     disagreement_rows = [
         {
             "timestamp": ts, "provider": prov, "target_device": dev, "circuit_hash": ch,
-            "old_check_said_within_tolerance": bool(old), "new_check_said_equivalent": bool(new),
-            "new_check_p_value": p,
+            "total_shots": shots, "marked_shots": marked, "claimed_probability": p0,
+            "equivalence_margin": {"lower": margin_lo, "upper": margin_hi},
+            "alpha": alpha, "confidence_interval": {"lower": ci_lo, "upper": ci_hi, "method": ci_m},
+            "p_value": p, "new_check_tost_verdict": verdict,
+            "old_check_said_within_tolerance": bool(old), "old_check_tolerance_used": old_tol,
         }
-        for ts, prov, dev, ch, old, new, p in disagreements
+        for ts, prov, dev, ch, shots, marked, p0, margin_lo, margin_hi, alpha, ci_lo, ci_hi, ci_m,
+            p, verdict, old, old_tol in disagreements
     ]
 
     return {

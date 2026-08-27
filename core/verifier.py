@@ -518,13 +518,9 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
 
     What a verifier actually needs is TOST (two one-sided tests) --
     H0 = "NOT equivalent" (true probability is more than `tolerance` away
-    from the claim), H1 = "equivalent" (within it). Implemented as two
-    one-sided exact binomial tests against the tolerance band's lower and
-    upper edge; the TOST p-value is the max of the two (standard
-    construction -- equivalence is only claimed once BOTH one-sided nulls
-    are rejected). This makes `tolerance` do double duty: it's still the
-    same band ground_truth_check already used, now also the actual
-    equivalence margin behind a real p-value.
+    from the claim), H1 = "equivalent" (within it). This makes `tolerance`
+    do double duty: it's still the same band ground_truth_check already
+    used, now also the actual equivalence margin behind a real p-value.
 
     IMPORTANT — the direction flipped from the first version: a SMALL
     p_value here means strong evidence FOR equivalence (good), not
@@ -536,11 +532,44 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
     cherry-picking across a batch, not easier to wave through a real
     problem.
 
+    REWRITTEN AGAIN 2026-08-27 (same day, second review pass) after two
+    more real bugs surfaced:
+
+    (a) TOST doesn't actually have two outcomes, it has three: confirmed
+    CLOSE (VERIFIED), confirmed FAR (FAIL), or just not enough shots yet
+    to tell either way (INCONCLUSIVE). Collapsing INCONCLUSIVE into
+    "not equivalent" reintroduces the exact disease this whole rewrite
+    started with -- an under-shotted run reading the same as a genuinely
+    bad one. Fixed by computing a real confidence interval (Wilson score)
+    and checking where it sits relative to the equivalence band: entirely
+    inside -> VERIFIED, entirely outside -> FAIL, straddling an edge ->
+    INCONCLUSIVE (with an estimate of how many more shots would resolve
+    it, computed directly, not guessed).
+
+    (b) The most common real case (a claim near-certain to land on one
+    outcome -- GHZ parity, stabilizer checks) pins the equivalence band's
+    upper edge at 1.0. Confirmed by direct reproduction: 1024/1024 shots
+    landing EXACTLY on the claim -- a perfect result -- came back "NOT
+    equivalent" with the worst possible p-value, because the upper
+    one-sided test ("is the true rate credibly below 1.0?") is
+    mathematically unanswerable from a perfect result: 100% success is
+    exactly as consistent with true_rate=0.999 as with true_rate=1.0, so
+    that test can never reject, and taking max(vacuous_p=1.0, real_p) just
+    threw away real evidence every time. Fixed by dropping the unreachable
+    side of the test entirely when the band's edge sits at 0.0 or 1.0,
+    rather than combining a meaningless statistic with a meaningful one.
+    The CI-containment check in (a) never had this problem in the first
+    place (a perfect result gives a CI that's naturally very close to
+    [something high, 1.0], which correctly falls inside a band pinned at
+    1.0) -- another reason CI-containment is the right primary mechanism,
+    with the one/two-sided binomial tests kept only to produce the actual
+    p-value Holm-Bonferroni correction needs.
+
     Still informational for now (kind="statistical", not wired to block
     verify() on its own) -- see the "graduation criteria" note on
     aggregate_significance for what needs to be true before that changes.
     """
-    from scipy.stats import binomtest
+    from scipy.stats import binomtest, norm
 
     if not hw_counts:
         return {"applicable": False,
@@ -566,14 +595,43 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
                 "note": f"Degenerate equivalence band [{p_lo}, {p_hi}] — this claim and tolerance "
                         "leave no real margin to test equivalence against."}
 
-    # Two one-sided tests: is the true rate credibly BELOW the upper edge,
-    # and credibly ABOVE the lower edge? Both must reject for equivalence.
-    p_upper = float(binomtest(marked_shots, total, p_hi, alternative="less").pvalue)
-    p_lower = float(binomtest(marked_shots, total, p_lo, alternative="greater").pvalue)
-    tost_p_value = max(p_upper, p_lower)
-    equivalent = tost_p_value < alpha
+    # One-sided tests, each skipped entirely when its edge sits at a
+    # parameter-space boundary (0.0 or 1.0) -- see rewrite note (b) above
+    # for why combining a vacuous boundary test with a real one is wrong.
+    upper_reachable = p_hi < 1.0
+    lower_reachable = p_lo > 0.0
+    p_upper = float(binomtest(marked_shots, total, p_hi, alternative="less").pvalue) if upper_reachable else None
+    p_lower = float(binomtest(marked_shots, total, p_lo, alternative="greater").pvalue) if lower_reachable else None
 
-    return {
+    if upper_reachable and lower_reachable:
+        tost_p_value = max(p_upper, p_lower)
+    elif lower_reachable:
+        tost_p_value = p_lower
+    elif upper_reachable:
+        tost_p_value = p_upper
+    else:
+        tost_p_value = 0.0  # band is the entire [0,1] range -- trivially equivalent
+
+    # Wilson score interval at the (1 - 2*alpha) level -- the standard
+    # duality with two one-sided tests at level alpha each (e.g. alpha=0.05
+    # -> a 90% CI). Used for the real VERIFIED/FAIL/INCONCLUSIVE call.
+    z = float(norm.ppf(1 - alpha))
+    phat = marked_shots / total
+    z2 = z * z
+    denom = 1 + z2 / total
+    center = (phat + z2 / (2 * total)) / denom
+    half_width = (z * math.sqrt(phat * (1 - phat) / total + z2 / (4 * total * total))) / denom
+    ci_lo = max(0.0, center - half_width)
+    ci_hi = min(1.0, center + half_width)
+
+    if ci_hi < p_lo or ci_lo > p_hi:
+        tost_verdict = "FAIL"
+    elif ci_lo >= p_lo and ci_hi <= p_hi:
+        tost_verdict = "VERIFIED"
+    else:
+        tost_verdict = "INCONCLUSIVE"
+
+    result = {
         "applicable": True,
         "kind": "statistical",
         "marked_shots": marked_shots,
@@ -583,19 +641,34 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
         "equivalence_margin": {"lower": round(p_lo, 6), "upper": round(p_hi, 6)},
         "observed_amplification": round(observed_amp, 4),
         "expected_amplification": expected_amplification,
+        "confidence_interval": {"lower": round(ci_lo, 6), "upper": round(ci_hi, 6), "method": "wilson"},
         "p_value": round(tost_p_value, 6),
         "alpha": alpha,
-        "equivalent_at_alpha": equivalent,
-        "verdict": (
-            f"The real observed result is statistically confirmed equivalent to the claimed "
-            f"{expected_amplification}x amplification within tolerance (TOST p={tost_p_value:.4g}) "
-            "— not just 'not proven different', genuinely proven close enough."
-            if equivalent else
-            f"The real observed result is NOT confirmed equivalent to the claimed "
-            f"{expected_amplification}x amplification (TOST p={tost_p_value:.4g}) — either it's "
-            "really off, or there isn't yet enough data to confirm it's close enough."
-        ),
+        "tost_verdict": tost_verdict,
+        "equivalent_at_alpha": tost_verdict == "VERIFIED",
     }
+
+    if tost_verdict == "INCONCLUSIVE":
+        band_center = (p_hi + p_lo) / 2
+        gap = half_width_margin = (p_hi - p_lo) / 2 - abs(phat - band_center)
+        if gap > 0 and 0.0 < phat < 1.0:
+            n_needed = math.ceil((z ** 2) * phat * (1 - phat) / (gap ** 2))
+            result["shots_needed_to_resolve"] = n_needed
+
+    result["verdict"] = (
+        f"VERIFIED: the real observed result is statistically confirmed equivalent to the claimed "
+        f"{expected_amplification}x amplification within tolerance (TOST p={tost_p_value:.4g})."
+        if tost_verdict == "VERIFIED" else
+        f"FAIL: the real observed result is statistically confirmed NOT equivalent to the claimed "
+        f"{expected_amplification}x amplification (TOST p={tost_p_value:.4g}) — a real discrepancy, "
+        "not just a lack of data."
+        if tost_verdict == "FAIL" else
+        f"INCONCLUSIVE: {total} shots is not enough to confirm or rule out equivalence to the "
+        f"claimed {expected_amplification}x amplification (TOST p={tost_p_value:.4g})."
+        + (f" Estimated ~{result['shots_needed_to_resolve']} shots needed to resolve."
+           if "shots_needed_to_resolve" in result else "")
+    )
+    return result
 
 
 def required_shots_check(n_marked: int, expected_amplification: float, n_qubits: int,
@@ -732,12 +805,21 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05, family_siz
     the number of applicable results only when not given -- safe ONLY for
     a batch you know is genuinely complete.
 
-    NOTE for future work: if a within-experiment statistical family ever
-    gets built (correcting across multiple checks inside one verify() call,
-    as opposed to this function's across-experiments correction), do NOT
-    feed already-Holm-adjusted p-values from one level into a correction at
-    the other level -- that double-corrects and silently makes the gate
-    over-conservative with no error or warning. Pick one level per p-value.
+    DOUBLE-CORRECTION GUARD: this function's own output is tagged
+    (each applicable entry in "results" carries "adjusted": True,
+    "method": "holm", "m": <family size used>) specifically so it can be
+    refused on the way back in. If any verify_result passed here already
+    carries ground_truth_significance_test["holm_adjusted"] = True (the
+    convention for marking a p-value that already went through this
+    function once), this raises rather than silently correcting it a
+    second time -- double correction is silently over-conservative, with
+    no error and no warning otherwise. This matters most at the MCP
+    boundary (correct_for_multiple_comparisons): nothing else stops a
+    caller from feeding this function's own output straight back into
+    itself. If a within-experiment statistical family is ever built
+    (correcting across multiple checks inside one verify() call, instead
+    of this function's across-experiments correction), the same rule
+    applies across THAT boundary too -- pick one level per p-value.
 
     Results with no applicable statistical test (ground_truth_significance_test
     missing or not applicable -- e.g. no expected_marked_bitstrings supplied,
@@ -753,6 +835,15 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05, family_siz
     and the older ground_truth_check tolerance band, reviewed after enough
     real experiments accumulate.
     """
+    for i, r in enumerate(verify_results):
+        if r.get("ground_truth_significance_test", {}).get("holm_adjusted"):
+            raise ValueError(
+                f"verify_results[{i}] already carries an adjusted p-value "
+                "(ground_truth_significance_test['holm_adjusted'] is True) -- correcting it "
+                "again would silently double-correct and make the gate over-conservative with "
+                "no warning. Pass the original, unadjusted verify() result instead."
+            )
+
     raw_p_by_index = {
         i: r["ground_truth_significance_test"]["p_value"]
         for i, r in enumerate(verify_results)
@@ -763,6 +854,9 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05, family_siz
     adjusted_p = holm_bonferroni_adjust(raw_p, family_size=family_size)
     adjusted_by_index = dict(zip(ordered_indices, adjusted_p))
 
+    submitted_count = len(raw_p)
+    n_family = family_size if family_size is not None else submitted_count
+
     per_result = []
     for i in range(len(verify_results)):
         if i in raw_p_by_index:
@@ -771,6 +865,9 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05, family_siz
             per_result.append({
                 "index": i,
                 "applicable": True,
+                "adjusted": True,
+                "method": "holm",
+                "m": n_family,
                 "raw_p_value": raw,
                 "holm_adjusted_p_value": round(adj, 6),
                 "significant_before_correction": raw < alpha,
@@ -778,9 +875,6 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05, family_siz
             })
         else:
             per_result.append({"index": i, "applicable": False})
-
-    submitted_count = len(raw_p)
-    n_family = family_size if family_size is not None else submitted_count
     n_sig_before = sum(1 for p in raw_p if p < alpha)
     n_sig_after = sum(1 for a in adjusted_p if a < alpha)
 
@@ -848,15 +942,21 @@ CHECK_TAXONOMY = {
     },
     "ground_truth_significance_test": {
         "kind": "statistical",
-        "rationale": "TOST equivalence test (two one-sided exact binomial "
-                      "tests) -- produces a real p-value against a "
-                      "well-defined null hypothesis ('not equivalent to the "
-                      "claim within tolerance'), not a difference test "
-                      "(rewritten 2026-08-27 after review: a plain "
-                      "difference test's p-value goes to 0 for ANY real "
-                      "device as shots increase, which is backwards for a "
-                      "safety gate). Currently the only check in this table "
-                      "that Holm-Bonferroni correction (aggregate_significance, "
+        "rationale": "TOST equivalence test via Wilson confidence-interval "
+                      "containment, with three real outcomes (VERIFIED / "
+                      "FAIL / INCONCLUSIVE, the last with an estimate of "
+                      "shots needed to resolve it) -- not a difference test "
+                      "(v1, 2026-08-26: a plain difference test's p-value "
+                      "goes to 0 for ANY real device as shots increase, "
+                      "backwards for a safety gate) and not a two-outcome "
+                      "collapse (v2, same day: found via direct "
+                      "reproduction that a PERFECT result near a claim "
+                      "pinned at 100% probability -- e.g. GHZ/stabilizer "
+                      "checks -- read as 'not equivalent' with the worst "
+                      "possible p-value, because the naive two-one-sided-"
+                      "test combination breaks at the 0/1 boundary). "
+                      "Currently the only check in this table that "
+                      "Holm-Bonferroni correction (aggregate_significance, "
                       "above) actually applies to.",
     },
     "falsify.isolated_effect_size": {
@@ -972,7 +1072,8 @@ def verify(
         )
         from core.memory import record_shadow_mode_comparison
         record_shadow_mode_comparison(provider, target_device, qasm_string,
-                                       gt, result["ground_truth_significance_test"])
+                                       gt, result["ground_truth_significance_test"],
+                                       old_check_tolerance=amplification_tolerance)
         if gt.get("applicable") and not gt["within_tolerance"]:
             return {**result, "verdict": "BLOCK", "reason": gt["verdict"]}
     else:

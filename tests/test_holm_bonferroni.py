@@ -92,7 +92,17 @@ def test_monte_carlo_family_wise_error_rate_is_controlled():
     inputs: under the null (every p-value genuinely random/uniform, no
     real effects anywhere), the probability of getting AT LEAST ONE false
     "significant" result after correction must not exceed alpha, across
-    many repeated trials. Seeded for reproducibility."""
+    many repeated trials.
+
+    Seeded for a deterministic result in CI (not just "seeded once" --
+    fixed so re-running this test always draws the exact same sequence).
+    Tolerance is alpha + 3 standard errors of the trial proportion itself
+    (a real margin derived from the trial count, not a made-up multiplier)
+    -- true FWER sits right at ~alpha, so a bare `<= alpha` assertion would
+    fail from ordinary sampling noise on a large fraction of runs even
+    when the code is completely correct. That would train exactly the
+    habit the xfail markers elsewhere in this suite exist to prevent:
+    re-running red tests instead of trusting green ones."""
     rng = random.Random(1234)
     trials = 5000
     m = 10
@@ -104,9 +114,10 @@ def test_monte_carlo_family_wise_error_rate_is_controlled():
         if any(p < alpha for p in adjusted):
             false_positive_trials += 1
     observed_fwer = false_positive_trials / trials
-    assert observed_fwer <= alpha * 1.25, (
+    se = (alpha * (1 - alpha) / trials) ** 0.5
+    assert observed_fwer <= alpha + 3 * se, (
         f"observed family-wise error rate {observed_fwer} exceeds the {alpha} guarantee "
-        "by more than sampling noise should allow"
+        f"by more than the {3 * se:.4f} sampling-noise margin should allow"
     )
 
 
@@ -170,3 +181,40 @@ def test_aggregate_significance_uses_declared_family_size_not_submitted_count():
     assert agg_declared["family_size"] == 20
     assert agg_declared["submitted_count"] == 1
     assert "1 of 20" in agg_declared["verdict"]
+
+
+def test_output_tags_each_applicable_result_as_adjusted():
+    """Real problem this guards against: nothing stops a caller from
+    feeding this function's own output straight back into itself, silently
+    double-correcting. Tagging the output is the first half of the fix --
+    'method'/'m' let a caller reconstruct exactly what was done, and
+    'adjusted' is what the input guard below checks for on the way back in."""
+    results = [_fake_result(0.01), _fake_result(0.02)]
+    agg = v.aggregate_significance(results)
+    for entry in agg["results"]:
+        assert entry["adjusted"] is True
+        assert entry["method"] == "holm"
+        assert entry["m"] == 2
+
+
+def test_refuses_to_correct_an_already_adjusted_p_value():
+    """The second half of the fix: a verify_result carrying the
+    'holm_adjusted' marker (the convention for 'this p-value already went
+    through aggregate_significance once') must be refused, not silently
+    corrected again -- double correction is silently over-conservative
+    with no other error or warning."""
+    already_adjusted = {
+        "ground_truth_significance_test": {
+            "applicable": True, "p_value": 0.2, "holm_adjusted": True,
+        }
+    }
+    with pytest.raises(ValueError, match="already carries an adjusted p-value"):
+        v.aggregate_significance([already_adjusted])
+
+
+def test_a_result_without_the_marker_is_still_accepted_normally():
+    """The guard must not be so broad it refuses ordinary, never-corrected
+    results -- only ones explicitly marked."""
+    results = [_fake_result(0.01)]
+    agg = v.aggregate_significance(results)  # must not raise
+    assert agg["submitted_count"] == 1

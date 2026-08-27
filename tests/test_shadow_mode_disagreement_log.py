@@ -5,6 +5,11 @@ for free, every time the old tolerance-band check (ground_truth_check) and
 the new statistical equivalence test (ground_truth_significance_test)
 agree or disagree. Doesn't need a real hardware result to be useful.
 
+Schema rewritten same day (second review pass): logs raw counts and full
+statistical detail (not just an agree/disagree boolean) — so the verdict
+can be recomputed later under a different alpha, tolerance, or CI method,
+which a boolean-only log makes impossible.
+
 Uses an isolated temp db (monkeypatched _DB_PATH) — never the real
 experiment_memory.db.
 """
@@ -29,8 +34,20 @@ def _old(within_tolerance):
     return {"applicable": True, "within_tolerance": within_tolerance}
 
 
-def _new(equivalent, p_value=0.01):
-    return {"applicable": True, "equivalent_at_alpha": equivalent, "p_value": p_value}
+def _new(equivalent, p_value=0.01, tost_verdict=None, total_shots=1000, marked_shots=500,
+         claimed_probability=0.5, ci=(0.47, 0.53)):
+    return {
+        "applicable": True,
+        "equivalent_at_alpha": equivalent,
+        "p_value": p_value,
+        "tost_verdict": tost_verdict or ("VERIFIED" if equivalent else "FAIL"),
+        "total_shots": total_shots,
+        "marked_shots": marked_shots,
+        "claimed_probability": claimed_probability,
+        "equivalence_margin": {"lower": claimed_probability - 0.05, "upper": claimed_probability + 0.05},
+        "alpha": 0.05,
+        "confidence_interval": {"lower": ci[0], "upper": ci[1], "method": "wilson"},
+    }
 
 
 def test_no_comparisons_logged_reports_zero_not_a_crash(temp_db):
@@ -47,16 +64,24 @@ def test_agreement_is_logged_but_not_counted_as_a_disagreement(temp_db):
     assert result["disagreement_count"] == 0
 
 
-def test_disagreement_is_logged_and_surfaced(temp_db):
+def test_disagreement_is_logged_with_full_raw_detail_not_just_a_flag(temp_db):
+    """The whole point of the schema rewrite: enough is logged to
+    recompute the verdict later, not just replay a boolean."""
     memory.record_shadow_mode_comparison("ionq", "forte-1", "OPENQASM 2.0;",
-                                          _old(True), _new(False, p_value=0.4))
+                                          _old(True), _new(False, p_value=0.4, tost_verdict="INCONCLUSIVE",
+                                                            total_shots=2000, marked_shots=1010),
+                                          old_check_tolerance=0.5)
     result = memory.shadow_mode_disagreement_log()
     assert result["total_comparisons_logged"] == 1
     assert result["disagreement_count"] == 1
     row = result["disagreements"][0]
     assert row["old_check_said_within_tolerance"] is True
-    assert row["new_check_said_equivalent"] is False
-    assert row["new_check_p_value"] == 0.4
+    assert row["new_check_tost_verdict"] == "INCONCLUSIVE"
+    assert row["p_value"] == 0.4
+    assert row["total_shots"] == 2000
+    assert row["marked_shots"] == 1010
+    assert row["confidence_interval"]["method"] == "wilson"
+    assert row["old_check_tolerance_used"] == 0.5
 
 
 def test_non_applicable_checks_are_silently_skipped(temp_db):

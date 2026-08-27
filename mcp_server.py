@@ -93,6 +93,10 @@ def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05,
     real batch was bigger than what got submitted here — dropping the
     boring results before calling this is p-hacking with a tool call.
 
+    Never feed this tool's own output back into itself — each corrected
+    result is tagged (adjusted/method/m) specifically so a second pass is
+    refused with an error instead of silently double-correcting.
+
     Args:
         verify_results : a list of the dict results returned by
                           verify_experiment (parse the JSON string back into
