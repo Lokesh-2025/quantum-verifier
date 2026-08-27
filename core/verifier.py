@@ -496,6 +496,73 @@ def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
     }
 
 
+def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: list,
+                                    expected_amplification: float) -> dict:
+    """
+    A real statistical test, added 2026-08-26 — ground_truth_check above
+    only ever checked "is the observed amplification within a fixed +/-50%
+    range," a rule of thumb, not a real hypothesis test. It never produced
+    an actual probability. This does: given the real observed counts, how
+    likely would a result at least this far from the claim be, by pure
+    chance, if the claim were exactly true?
+
+    Uses scipy's exact one-sample binomial test (not a normal
+    approximation, which can be unreliable at small shot counts — the same
+    reasoning required_shots_check already applies when deciding whether
+    an experiment even has enough shots to be conclusive). This is the
+    real p-value-producing check that was missing before any multiple-
+    comparisons correction work could make sense — see the "Group 2 is
+    currently empty" finding this was built to fix.
+
+    Added ALONGSIDE ground_truth_check, not replacing it yet — this is
+    informational for now (kind="statistical", not wired to block verify()
+    on its own), so nothing about verify()'s existing behavior changes
+    until this has its own real track record.
+    """
+    from scipy.stats import binomtest
+
+    if not hw_counts:
+        return {"applicable": False,
+                "note": "No counts available (IBM path returns a fidelity estimate, not counts)."}
+    total = sum(hw_counts.values())
+    if total == 0:
+        return {"applicable": False, "note": "Zero total shots — nothing to test."}
+
+    marked = set(expected_marked_bitstrings)
+    n_qubits = len(next(iter(hw_counts.keys())))
+    marked_shots = sum(c for b, c in hw_counts.items() if b in marked)
+    baseline_p = len(marked) / (2 ** n_qubits)
+    if baseline_p <= 0:
+        return {"applicable": False, "note": "No marked bitstrings — nothing to test against."}
+
+    p_claimed = min(1.0, baseline_p * expected_amplification)
+    observed_amp = (marked_shots / total) / baseline_p
+
+    test_result = binomtest(marked_shots, total, p_claimed, alternative="two-sided")
+    p_value = float(test_result.pvalue)  # plain Python float/bool, not numpy types -- JSON serialization needs this
+
+    return {
+        "applicable": True,
+        "kind": "statistical",
+        "marked_shots": marked_shots,
+        "total_shots": total,
+        "baseline_probability": round(baseline_p, 6),
+        "claimed_probability": round(p_claimed, 6),
+        "observed_amplification": round(observed_amp, 4),
+        "expected_amplification": expected_amplification,
+        "p_value": round(p_value, 6),
+        "significant_at_0.05": p_value < 0.05,
+        "verdict": (
+            f"The real observed result (p={p_value:.4g}) is NOT statistically consistent with "
+            f"the claimed {expected_amplification}x amplification — this isn't just outside a "
+            f"tolerance band, it's an actual low-probability outcome under the claim."
+            if p_value < 0.05 else
+            f"The real observed result is statistically consistent with the claimed "
+            f"{expected_amplification}x amplification (p={p_value:.4g})."
+        ),
+    }
+
+
 def required_shots_check(n_marked: int, expected_amplification: float, n_qubits: int,
                           requested_shots: int, confidence: float = 0.95, power: float = 0.80) -> dict:
     """
@@ -626,6 +693,12 @@ def verify(
         gt = ground_truth_check(hw.get("counts"), expected_marked_bitstrings,
                                  expected_amplification, amplification_tolerance)
         result["ground_truth_check"] = gt
+        # Informational only for now, not wired to block — see this
+        # function's own docstring for why it exists alongside the older
+        # tolerance-band check rather than replacing it yet.
+        result["ground_truth_significance_test"] = ground_truth_significance_test(
+            hw.get("counts"), expected_marked_bitstrings, expected_amplification,
+        )
         if gt.get("applicable") and not gt["within_tolerance"]:
             return {**result, "verdict": "BLOCK", "reason": gt["verdict"]}
     else:
