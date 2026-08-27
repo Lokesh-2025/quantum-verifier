@@ -17,6 +17,8 @@ import sys
 import pytest
 from dotenv import load_dotenv
 
+import providers.ibm as ibm
+
 load_dotenv()
 
 IONQ_KEY_PRESENT = bool(os.getenv("IONQ_API_KEY"))
@@ -25,6 +27,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 OLD_REPO = os.path.expanduser("~/quantum-hardware-mcp")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ibm_history_db(tmp_path, monkeypatch):
+    """test_list_devices_matches_old_repo_structurally calls the real,
+    live IBM API and writes real calibration snapshots to ibm_history.db as
+    a side effect. Isolate that write, mirroring the fix already used in
+    test_calibration_auditor.py / test_chip_identity.py / test_drift_gate.py /
+    test_reproducibility_qubit_selection.py. The old repo's own copy of
+    list_devices (loaded separately below via _load_old_server) is untouched
+    by this -- it writes nowhere, this file is read-only against it."""
+    db_path = str(tmp_path / "test_ibm_history.db")
+    monkeypatch.setattr(ibm, "DB_PATH", db_path)
+    ibm._init_db()
 
 
 def _load_old_server():

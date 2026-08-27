@@ -23,6 +23,8 @@ import json
 import os
 import sqlite3
 
+from core.schema_guard import assert_schema_matches
+
 _DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "experiment_memory.db")
 
 
@@ -44,6 +46,11 @@ def _connect():
             real_result_recorded_at TEXT
         )
     """)
+    assert_schema_matches(conn, "predictions", [
+        "id", "timestamp", "provider", "target_device", "circuit_hash",
+        "circuit_index_in_job", "marked_bitstrings", "predicted_amplification",
+        "source", "real_job_id", "real_amplification", "real_result_recorded_at",
+    ])
     conn.execute("""
         CREATE TABLE IF NOT EXISTS shadow_mode_comparisons (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +75,13 @@ def _connect():
             agree INTEGER NOT NULL
         )
     """)
+    assert_schema_matches(conn, "shadow_mode_comparisons", [
+        "id", "timestamp", "provider", "target_device", "circuit_hash", "source",
+        "total_shots", "marked_shots", "claimed_probability",
+        "equivalence_margin_lower", "equivalence_margin_upper", "alpha",
+        "ci_lower", "ci_upper", "ci_method", "p_value", "tost_verdict",
+        "old_check_within_tolerance", "old_check_tolerance_used", "agree",
+    ])
     conn.commit()
     return conn
 

@@ -16,8 +16,24 @@ pytestmark = pytest.mark.skipif(
     not IBM_TOKEN_PRESENT, reason="IBM_QUANTUM_TOKEN not set — skipping live IBM tooling tests"
 )
 
+import providers.ibm as ibm
 from providers.ibm import ibm_account_check, _check_ibm_quota_before_submitting
 from qiskit import QuantumCircuit
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ibm_history_db(tmp_path, monkeypatch):
+    """This file makes real IBM API calls (list_devices), which write real
+    calibration snapshots to ibm_history.db as a side effect. Isolate that
+    write from the real db, mirroring the fix already used in
+    test_calibration_auditor.py / test_chip_identity.py / test_drift_gate.py /
+    test_reproducibility_qubit_selection.py. Found missing here during the
+    2026-08-27 overnight provenance audit (~14,500 rows, ~78% of
+    device_snapshots timestamps clustered <10min apart -- real data, but with
+    an uncontrolled, test-driven collection cadence)."""
+    db_path = str(tmp_path / "test_ibm_history.db")
+    monkeypatch.setattr(ibm, "DB_PATH", db_path)
+    ibm._init_db()
 
 
 def test_account_check_returns_real_instance_and_usage_data():

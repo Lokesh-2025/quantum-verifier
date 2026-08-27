@@ -7,8 +7,8 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 | | |
 |---|---|
 | **Tools** | 48 |
-| **Tests** | 177, 173 passing (4 xfailed — external IonQ/IBM account-state issues, not code bugs) |
-| **Real bugs caught before they cost anything** | 4 (pre-2026-08-27 count; several more found since — see overnight report, not yet re-tallied) |
+| **Tests** | 195 — 191 passing, 3 xfailed (external IonQ/IBM account-state issues, not code bugs), 1 xpassed. Composed from today's full run (2 failures) plus a targeted re-run proving the fix; not yet re-confirmed in one single full pass — see POSTMORTEMS.md |
+| **Real bugs caught before they cost anything** | See [POSTMORTEMS.md](POSTMORTEMS.md) for the honest, itemized list — deliberately not reduced to a single count here |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
 | **Postmortems** | [POSTMORTEMS.md](POSTMORTEMS.md) — real incidents in this project's own tooling, written up honestly |
@@ -127,7 +127,7 @@ circuit + target device + (optional) expected result
 
 **`ionq_preflight`** — one call for the whole recommended pre-submission sequence (account/budget check, device standing, per-circuit verification, real cost check) instead of remembering to call four or five tools in the right order.
 
-**Experiment Memory + Intelligence** (`memory_summary`, `recommend_tolerance`) — every real self-check prediction gets logged automatically; once a real job completes, `ionq_sync_memory_for_job` records what actually happened next to it. `recommend_tolerance` uses that real accuracy history to recommend a tolerance for a given provider/device instead of a guessed default — honestly falling back to the default when there isn't yet enough real data to justify anything more specific.
+**Experiment Memory + Intelligence** (`memory_summary`, `recommend_tolerance`) — IonQ's submit-job self-check logs every real prediction automatically (via `ionq_submit_job`); `verify_experiment`'s own path doesn't feed this yet, the same IonQ-only scope `verdict_track_record` already discloses in its own output. Once a real job completes, `ionq_sync_memory_for_job` records what actually happened next to it. `recommend_tolerance` uses that real accuracy history to recommend a tolerance for a given provider/device instead of a guessed default — honestly falling back to the default when there isn't yet enough real data to justify anything more specific, though as of 2026-08-27 no internal code path or data-store evidence shows it's been invoked for a real decision yet.
 
 Plus the general-purpose device-intelligence, job-lifecycle, account/budget visibility (`ionq_account_check`, `ibm_account_check`), and IonQ pre-flight tooling, carried over from and extended beyond `quantum-hardware-mcp`.
 

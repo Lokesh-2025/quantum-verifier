@@ -17,6 +17,15 @@ built) proposal. This only proves the failure mode is real, named, and
 guarded against regressing further -- e.g. a future column addition that
 doesn't account for existing real deployments.
 
+Updated the same morning these were written: the schema-drift startup
+check (core/schema_guard.py, Option B from the postmortem) now catches
+both of these stale schemas at _connect() time, before the INSERT is ever
+attempted -- so the failure is now SchemaDriftError, raised earlier and
+with an explicit missing/unexpected-column message, not the old implicit
+sqlite3.OperationalError from deep inside the INSERT. The thing being
+proven is unchanged (stale schema must fail loudly, never silently); only
+the exception type and where it fires improved.
+
 Uses an isolated temp db (monkeypatched _DB_PATH) — never the real
 experiment_memory.db.
 """
@@ -29,6 +38,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import core.memory as memory
+from core.schema_guard import SchemaDriftError
 
 
 @pytest.fixture
@@ -112,7 +122,7 @@ def test_v0_boolean_only_schema_fails_against_current_code(temp_db):
     code's INSERT, which expects 19 additional columns. This must FAIL,
     not silently succeed or silently drop data."""
     _create_with_raw_schema(temp_db, V0_SCHEMA_SQL)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(SchemaDriftError):
         memory.record_shadow_mode_comparison("ionq", "forte-1", "OPENQASM 2.0;",
                                               _old(True), _new(True))
 
@@ -124,7 +134,7 @@ def test_v1_pre_source_schema_fails_against_current_code(temp_db):
     table on disk had this schema, and the next real write would have
     crashed. Must FAIL here too, reproducibly."""
     _create_with_raw_schema(temp_db, V1_SCHEMA_SQL)
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(SchemaDriftError):
         memory.record_shadow_mode_comparison("ionq", "forte-1", "OPENQASM 2.0;",
                                               _old(True), _new(True))
 

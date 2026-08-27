@@ -32,6 +32,8 @@ from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime import QiskitRuntimeService
 
+from core.schema_guard import assert_schema_matches
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "ibm_history.db")
 
 
@@ -72,6 +74,16 @@ def _init_db() -> None:
                 max_experiments   INTEGER
             )
         """)
+        assert_schema_matches(con, "device_snapshots", [
+            "id", "ts", "name", "num_qubits", "operational", "pending_jobs",
+            "avg_cx_error", "avg_readout_error", "median_t1_us", "median_t2_us",
+            "qubit_yield_fraction", "day_of_week", "hour_utc", "processor_family",
+            "backend_version", "last_calibration_dt", "clops_h", "quantum_volume",
+            "avg_2q_gate_duration_ns", "avg_prob_meas0_prep1", "avg_prob_meas1_prep0",
+            "provider", "online_date", "dt_ns", "avg_readout_length_ns",
+            "rep_delay_default_ms", "native_gate_set", "coupling_map_edges",
+            "connectivity_density", "max_shots", "max_experiments",
+        ])
         con.execute("CREATE INDEX IF NOT EXISTS idx_name_ts ON device_snapshots (name, ts)")
         con.execute("""
             CREATE TABLE IF NOT EXISTS repro_experiments (
@@ -84,6 +96,9 @@ def _init_db() -> None:
                 status      TEXT NOT NULL DEFAULT 'pending'
             )
         """)
+        assert_schema_matches(con, "repro_experiments", [
+            "id", "created_ts", "device_name", "circuit", "n_runs", "shots", "status",
+        ])
         con.execute("""
             CREATE TABLE IF NOT EXISTS repro_runs (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +111,10 @@ def _init_db() -> None:
                 calibration_epoch TEXT
             )
         """)
+        assert_schema_matches(con, "repro_runs", [
+            "id", "experiment_id", "run_index", "submitted_ts", "job_id",
+            "status", "counts", "calibration_epoch",
+        ])
         con.execute("""
             CREATE TABLE IF NOT EXISTS job_submissions (
                 id                        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +128,10 @@ def _init_db() -> None:
                 ts                        TEXT
             )
         """)
+        assert_schema_matches(con, "job_submissions", [
+            "id", "job_id", "tool_name", "backend_name", "circuit_qubits",
+            "circuit_depth_raw", "circuit_depth_transpiled", "shots_requested", "ts",
+        ])
 
         # Per-qubit/per-pair calibration archive, ported from
         # quantum-hardware-mcp 2026-08-24 — see check_chip_identity below.
@@ -140,6 +163,17 @@ def _init_db() -> None:
                 UNIQUE(device_name, vendor_measured_at)
             );
         """)
+        assert_schema_matches(con, "qubit_snapshots", [
+            "id", "device_name", "qubit_index", "property_name", "value", "unit",
+            "vendor_measured_at", "polled_at",
+        ])
+        assert_schema_matches(con, "pair_snapshots", [
+            "id", "device_name", "qubit1", "qubit2", "gate_name", "property_name",
+            "value", "unit", "vendor_measured_at", "polled_at",
+        ])
+        assert_schema_matches(con, "raw_properties_archive", [
+            "id", "device_name", "vendor_measured_at", "raw_json_gzip", "polled_at",
+        ])
 
 
 def _save_snapshots(rows: list) -> None:
