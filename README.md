@@ -11,6 +11,7 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 | **Real bugs caught before they cost anything** | 4 |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
+| **Postmortems** | [POSTMORTEMS.md](POSTMORTEMS.md) — real incidents in this project's own tooling, written up honestly |
 
 ---
 
