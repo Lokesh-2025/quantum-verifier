@@ -10,6 +10,7 @@ import json
 from mcp.server.fastmcp import FastMCP
 
 from core.verifier import verify as _verify
+from core.verifier import aggregate_significance as _aggregate_significance
 from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
@@ -65,6 +66,30 @@ def verify_experiment(
         qasm_string, provider, target_device, shots,
         expected_marked_bitstrings, expected_amplification, amplification_tolerance,
     ), indent=2)
+
+
+@mcp.tool()
+def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05) -> str:
+    """
+    Run this after collecting a BATCH of verify_experiment results — one per
+    circuit in an angle sweep, one per device, one per qubit pair, any set
+    where the same kind of claim was tested more than once in the same
+    experiment. Applies the Holm-Bonferroni correction across the whole
+    batch's real p-values (from each result's ground_truth_significance_test)
+    instead of judging each result against raw p<0.05 on its own.
+
+    Why this matters: test 20 claims independently and roughly 1 will look
+    "significant" at p<0.05 by pure chance alone, even with nothing real
+    going on — this tells you which "significant" results survive once
+    that's accounted for.
+
+    Args:
+        verify_results : a list of the dict results returned by
+                          verify_experiment (parse the JSON string back into
+                          a dict first if it was serialized)
+        alpha           : family-wise significance threshold (default 0.05)
+    """
+    return json.dumps(_aggregate_significance(verify_results, alpha), indent=2)
 
 
 @mcp.tool()

@@ -621,6 +621,109 @@ def required_shots_check(n_marked: int, expected_amplification: float, n_qubits:
     }
 
 
+def holm_bonferroni_adjust(p_values: list) -> list:
+    """
+    Real, standard fix for a real problem: run enough independent
+    hypothesis tests and some will look "significant" at p<0.05 by pure
+    chance alone -- that's not a hardware effect, it's arithmetic. Added
+    2026-08-26, once ground_truth_significance_test existed as the first
+    real p-value-producing check to actually need this correction.
+
+    Holm-Bonferroni step-down procedure (Holm, 1979) -- controls the
+    family-wise error rate (probability of ANY false positive across the
+    whole batch) at the target level, same guarantee as a plain Bonferroni
+    correction but strictly more powerful (fewer real effects missed),
+    since each successive test only has to clear a threshold based on how
+    many tests are still ahead of it, not the full family count every time.
+
+    Returns adjusted p-values in the SAME order as the input -- compare
+    each directly against your alpha (e.g. < 0.05); the correction has
+    already been folded in, don't re-divide by the family size yourself.
+    """
+    m = len(p_values)
+    if m == 0:
+        return []
+
+    ranked = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [0.0] * m
+    running_max = 0.0
+    for rank, orig_idx in enumerate(ranked):
+        multiplier = m - rank
+        step = multiplier * p_values[orig_idx]
+        running_max = max(running_max, step)
+        adjusted[orig_idx] = min(running_max, 1.0)
+    return adjusted
+
+
+def aggregate_significance(verify_results: list, alpha: float = 0.05) -> dict:
+    """
+    Takes a BATCH of verify() results -- one per circuit in an angle sweep,
+    one per device, one per qubit pair, anywhere the same kind of
+    statistical claim gets tested more than once in the same experiment --
+    and applies the Holm-Bonferroni correction across the whole batch's
+    real p-values (from ground_truth_significance_test), instead of judging
+    each result against raw p<0.05 in isolation.
+
+    This is the piece ground_truth_significance_test alone can't do: it can
+    say "this one result is surprising" on its own, but only checking it
+    against the rest of the batch it was run alongside can honestly say
+    "this one is STILL surprising after accounting for how many other
+    claims were being tested at the same time."
+
+    Results with no applicable statistical test (ground_truth_significance_test
+    missing or not applicable -- e.g. no expected_marked_bitstrings supplied,
+    or the IBM path, which returns a fidelity estimate rather than counts)
+    are passed through untouched and excluded from the correction -- they
+    were never really part of the family being tested.
+    """
+    raw_p_by_index = {
+        i: r["ground_truth_significance_test"]["p_value"]
+        for i, r in enumerate(verify_results)
+        if r.get("ground_truth_significance_test", {}).get("applicable")
+    }
+    ordered_indices = list(raw_p_by_index.keys())
+    raw_p = [raw_p_by_index[i] for i in ordered_indices]
+    adjusted_p = holm_bonferroni_adjust(raw_p)
+    adjusted_by_index = dict(zip(ordered_indices, adjusted_p))
+
+    per_result = []
+    for i in range(len(verify_results)):
+        if i in raw_p_by_index:
+            raw = raw_p_by_index[i]
+            adj = adjusted_by_index[i]
+            per_result.append({
+                "index": i,
+                "applicable": True,
+                "raw_p_value": raw,
+                "holm_adjusted_p_value": round(adj, 6),
+                "significant_before_correction": raw < alpha,
+                "significant_after_correction": adj < alpha,
+            })
+        else:
+            per_result.append({"index": i, "applicable": False})
+
+    n_family = len(raw_p)
+    n_sig_before = sum(1 for p in raw_p if p < alpha)
+    n_sig_after = sum(1 for a in adjusted_p if a < alpha)
+
+    return {
+        "family_size": n_family,
+        "alpha": alpha,
+        "significant_before_correction": n_sig_before,
+        "significant_after_correction": n_sig_after,
+        "results": per_result,
+        "verdict": (
+            "No statistical tests in this batch were applicable -- nothing to correct."
+            if n_family == 0 else
+            f"Of {n_family} results tested, {n_sig_before} looked significant on their own, "
+            f"but only {n_sig_after} remain significant once corrected for testing {n_family} "
+            "claims at once."
+            + (" These are the false alarms multiple-comparisons correction exists to catch."
+               if n_sig_before > n_sig_after else "")
+        ),
+    }
+
+
 # ---------------------------------------------------------------- orchestrator
 def verify(
     qasm_string: str,
