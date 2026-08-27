@@ -51,6 +51,7 @@ def _connect():
             provider TEXT NOT NULL,
             target_device TEXT NOT NULL,
             circuit_hash TEXT NOT NULL,
+            source TEXT NOT NULL,
             total_shots INTEGER NOT NULL,
             marked_shots INTEGER NOT NULL,
             claimed_probability REAL NOT NULL,
@@ -152,20 +153,43 @@ def find_predictions_for_job(job_id: str) -> list:
     ]
 
 
+# Added 2026-08-27, after a real audit found 42 of 45 rows in this table
+# (93%) were an identical repeated tests/test_intelligence.py fixture --
+# predicted=10.0, real=8.0, over and over, every time the suite ran,
+# because that test called record_prediction/record_real_result with no
+# db isolation. The 'source' column had existed since this table was
+# built, but nothing ever filtered by it, so verdict_track_record()'s
+# "1.0 hit rate" was silently 93% synthetic while its own docstring
+# promised "the tool's real accuracy record, not a claim." tests/conftest.py
+# (added same day) now isolates ALL tests to a temp db, so this can't
+# recur going forward -- this filter is the second, defense-in-depth
+# layer for the data that's already real: exclude known-synthetic
+# sources from the two functions that answer "how much should this be
+# trusted," even if something bypasses isolation again later.
+_NON_REAL_SOURCES = frozenset({"unit_test"})
+
+
 def memory_summary(provider: str = None) -> dict:
     """How much should predictions from this tool actually be trusted?
     Real numbers from real recorded predictions, broken down by provider
-    and target device, not a guess."""
+    and target device, not a guess. Excludes known-synthetic sources
+    (_NON_REAL_SOURCES) — see the comment above that constant."""
     conn = _connect()
-    query = "SELECT provider, target_device, predicted_amplification, real_amplification FROM predictions WHERE real_amplification IS NOT NULL"
-    params = ()
+    placeholders = ",".join("?" for _ in _NON_REAL_SOURCES)
+    query = (f"SELECT provider, target_device, predicted_amplification, real_amplification "
+              f"FROM predictions WHERE real_amplification IS NOT NULL "
+              f"AND source NOT IN ({placeholders})")
+    params = list(_NON_REAL_SOURCES)
     if provider:
         query += " AND provider = ?"
-        params = (provider,)
+        params.append(provider)
     rows = conn.execute(query, params).fetchall()
-    total_predictions = conn.execute(
-        "SELECT COUNT(*) FROM predictions" + (" WHERE provider = ?" if provider else ""), params
-    ).fetchone()[0]
+    count_query = f"SELECT COUNT(*) FROM predictions WHERE source NOT IN ({placeholders})"
+    count_params = list(_NON_REAL_SOURCES)
+    if provider:
+        count_query += " AND provider = ?"
+        count_params.append(provider)
+    total_predictions = conn.execute(count_query, count_params).fetchone()[0]
     conn.close()
 
     if not rows:
@@ -218,14 +242,19 @@ def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> dict:
     does not yet — so this track record is IonQ-only in practice until
     that's added, and this function says so explicitly rather than
     silently reporting a partial number as if it were complete.
+
+    Excludes known-synthetic sources (_NON_REAL_SOURCES) — see the comment
+    on that constant above memory_summary().
     """
     conn = _connect()
+    placeholders = ",".join("?" for _ in _NON_REAL_SOURCES)
     query = ("SELECT provider, target_device, predicted_amplification, real_amplification "
-              "FROM predictions WHERE real_amplification IS NOT NULL AND predicted_amplification IS NOT NULL")
-    params = ()
+              "FROM predictions WHERE real_amplification IS NOT NULL AND predicted_amplification IS NOT NULL "
+              f"AND source NOT IN ({placeholders})")
+    params = list(_NON_REAL_SOURCES)
     if provider:
         query += " AND provider = ?"
-        params = (provider,)
+        params.append(provider)
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
@@ -272,7 +301,8 @@ def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> dict:
 
 def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string: str,
                                    old_check: dict, new_check: dict,
-                                   old_check_tolerance: float = None) -> None:
+                                   old_check_tolerance: float = None,
+                                   source: str = "verify_experiment") -> None:
     """
     Added 2026-08-27, per external review's item 4 — called the "cheapest
     thing on the list and probably the most informative." Every time
@@ -294,6 +324,17 @@ def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string
     bounds/method, p-value, TOST verdict) needed to recompute the verdict
     from scratch with different parameters, not just replay this one.
 
+    `source` is REQUIRED (not nullable) — added same day, after auditing
+    core/memory.py's older `predictions` table and finding 42 of 45 rows
+    were an unisolated test fixture that had been silently diluting
+    verdict_track_record()'s live "how trustworthy is this tool" number
+    for weeks (see _NON_REAL_SOURCES below). tests/conftest.py's isolation
+    fixture is the real fix for THIS table specifically (nothing has ever
+    written to it outside a test run without isolation), but a required
+    provenance column is the second, defense-in-depth layer the audit
+    argued for: "did test data get in" becomes a query, not an
+    archaeology project, for whatever writes to this table next.
+
     job_id and circuit layout are NOT logged — verify() runs pre-
     submission, before either exists yet, so there's nothing real to put
     there. An honest scope boundary, not an oversight: this is a record of
@@ -313,12 +354,12 @@ def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string
     conn = _connect()
     conn.execute(
         "INSERT INTO shadow_mode_comparisons (timestamp, provider, target_device, circuit_hash, "
-        "total_shots, marked_shots, claimed_probability, equivalence_margin_lower, "
+        "source, total_shots, marked_shots, claimed_probability, equivalence_margin_lower, "
         "equivalence_margin_upper, alpha, ci_lower, ci_upper, ci_method, p_value, tost_verdict, "
         "old_check_within_tolerance, old_check_tolerance_used, agree) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (datetime.datetime.now(datetime.timezone.utc).isoformat(), provider, target_device,
-         _circuit_hash(qasm_string), new_check["total_shots"], new_check["marked_shots"],
+         _circuit_hash(qasm_string), source, new_check["total_shots"], new_check["marked_shots"],
          new_check["claimed_probability"], margin["lower"], margin["upper"], new_check["alpha"],
          ci["lower"], ci["upper"], ci["method"], new_check["p_value"], new_check["tost_verdict"],
          int(old_verdict), old_check_tolerance, int(old_verdict == new_verdict)),
@@ -336,29 +377,40 @@ def shadow_mode_disagreement_log(limit: int = 50) -> dict:
     flag) so a human can look at them, re-derive the verdict under
     different parameters if needed, and decide whether the new equivalence
     test or the old tolerance band was right, case by case.
+
+    Excludes known-synthetic sources (_NON_REAL_SOURCES) — same reasoning
+    as memory_summary()/verdict_track_record(): this log exists to be read
+    once real experiments accumulate, and a synthetic row counted toward
+    that is exactly the failure mode the 2026-08-27 predictions-table audit
+    found and fixed elsewhere in this file.
     """
     conn = _connect()
-    total = conn.execute("SELECT COUNT(*) FROM shadow_mode_comparisons").fetchone()[0]
+    placeholders = ",".join("?" for _ in _NON_REAL_SOURCES)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM shadow_mode_comparisons WHERE source NOT IN ({placeholders})",
+        list(_NON_REAL_SOURCES),
+    ).fetchone()[0]
     disagreements = conn.execute(
-        "SELECT timestamp, provider, target_device, circuit_hash, total_shots, marked_shots, "
-        "claimed_probability, equivalence_margin_lower, equivalence_margin_upper, alpha, "
-        "ci_lower, ci_upper, ci_method, p_value, tost_verdict, old_check_within_tolerance, "
-        "old_check_tolerance_used FROM shadow_mode_comparisons WHERE agree = 0 "
-        "ORDER BY id DESC LIMIT ?", (limit,)
+        "SELECT timestamp, provider, target_device, circuit_hash, source, total_shots, "
+        "marked_shots, claimed_probability, equivalence_margin_lower, equivalence_margin_upper, "
+        "alpha, ci_lower, ci_upper, ci_method, p_value, tost_verdict, old_check_within_tolerance, "
+        f"old_check_tolerance_used FROM shadow_mode_comparisons "
+        f"WHERE agree = 0 AND source NOT IN ({placeholders}) "
+        "ORDER BY id DESC LIMIT ?", list(_NON_REAL_SOURCES) + [limit],
     ).fetchall()
     conn.close()
 
     disagreement_rows = [
         {
             "timestamp": ts, "provider": prov, "target_device": dev, "circuit_hash": ch,
-            "total_shots": shots, "marked_shots": marked, "claimed_probability": p0,
+            "source": src, "total_shots": shots, "marked_shots": marked, "claimed_probability": p0,
             "equivalence_margin": {"lower": margin_lo, "upper": margin_hi},
             "alpha": alpha, "confidence_interval": {"lower": ci_lo, "upper": ci_hi, "method": ci_m},
             "p_value": p, "new_check_tost_verdict": verdict,
             "old_check_said_within_tolerance": bool(old), "old_check_tolerance_used": old_tol,
         }
-        for ts, prov, dev, ch, shots, marked, p0, margin_lo, margin_hi, alpha, ci_lo, ci_hi, ci_m,
-            p, verdict, old, old_tol in disagreements
+        for ts, prov, dev, ch, src, shots, marked, p0, margin_lo, margin_hi, alpha, ci_lo, ci_hi,
+            ci_m, p, verdict, old, old_tol in disagreements
     ]
 
     return {

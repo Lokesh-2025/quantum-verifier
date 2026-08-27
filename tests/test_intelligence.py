@@ -2,6 +2,18 @@
 Test coverage for core/intelligence.py — the third deferred layer
 (Memory, Postmortem, Intelligence) from the original plan, built only
 after Memory had real data to draw from.
+
+Isolated to a temp db by tests/conftest.py's session-wide autouse fixture
+(added 2026-08-27, after an audit found this file's OWN fixture data --
+source="unit_test", predicted=10.0/real=8.0, repeated on every prior
+uninstalled test run -- had silently accumulated to 42 of 45 rows in the
+REAL predictions table, corrupting verdict_track_record()'s live "how
+trustworthy is this tool" number for weeks). Uses source="verify_experiment"
+(the real default) rather than "unit_test" now: core.memory._NON_REAL_SOURCES
+excludes "unit_test" specifically so memory_summary()/verdict_track_record()
+never again average in synthetic fixture data, and this file's data is
+genuinely isolated (its own temp db) so there's no real provenance lie in
+using the real-looking source label here.
 """
 from core.intelligence import recommend_tolerance, MIN_DATA_POINTS_FOR_RECOMMENDATION
 from core.memory import record_prediction, record_real_result
@@ -24,7 +36,7 @@ def test_recommend_tolerance_uses_real_data_once_enough_exists():
     for i in range(MIN_DATA_POINTS_FOR_RECOMMENDATION):
         pred = record_prediction(
             fake_qasm_base + f"// variant {i}\n", provider=provider, target_device=device,
-            predicted_amplification=10.0, marked_bitstrings=["0"], source="unit_test",
+            predicted_amplification=10.0, marked_bitstrings=["0"], source="verify_experiment",
         )
         record_real_result(pred["prediction_id"], real_amplification=8.0)  # 20% off
 

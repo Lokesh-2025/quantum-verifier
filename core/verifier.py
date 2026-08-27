@@ -646,6 +646,7 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
         "alpha": alpha,
         "tost_verdict": tost_verdict,
         "equivalent_at_alpha": tost_verdict == "VERIFIED",
+        "one_sided": not (upper_reachable and lower_reachable),
     }
 
     if tost_verdict == "INCONCLUSIVE":
@@ -655,18 +656,25 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
             n_needed = math.ceil((z ** 2) * phat * (1 - phat) / (gap ** 2))
             result["shots_needed_to_resolve"] = n_needed
 
+    one_sided_note = (
+        " (one-sided test — the other side of the equivalence band sits at the 0/1 boundary, "
+        "unreachable from any finite sample, so only one side was actually tested)"
+        if result["one_sided"] else ""
+    )
     result["verdict"] = (
         f"VERIFIED: the real observed result is statistically confirmed equivalent to the claimed "
         f"{expected_amplification}x amplification within tolerance (TOST p={tost_p_value:.4g})."
+        + one_sided_note
         if tost_verdict == "VERIFIED" else
         f"FAIL: the real observed result is statistically confirmed NOT equivalent to the claimed "
         f"{expected_amplification}x amplification (TOST p={tost_p_value:.4g}) — a real discrepancy, "
-        "not just a lack of data."
+        "not just a lack of data." + one_sided_note
         if tost_verdict == "FAIL" else
         f"INCONCLUSIVE: {total} shots is not enough to confirm or rule out equivalence to the "
         f"claimed {expected_amplification}x amplification (TOST p={tost_p_value:.4g})."
         + (f" Estimated ~{result['shots_needed_to_resolve']} shots needed to resolve."
            if "shots_needed_to_resolve" in result else "")
+        + one_sided_note
     )
     return result
 

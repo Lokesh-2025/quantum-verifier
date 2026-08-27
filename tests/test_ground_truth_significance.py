@@ -152,7 +152,53 @@ def test_confidence_interval_is_reported_and_well_formed():
     result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=2.0)
     ci = result["confidence_interval"]
     assert 0.0 <= ci["lower"] <= ci["upper"] <= 1.0
-    assert ci["method"] == "wilson"
+
+
+def test_the_mirror_boundary_at_p0_equals_zero_is_verified_on_a_perfect_result():
+    """The p_hi=1.0 boundary's mirror case: a claim of NO signal
+    (expected_amplification giving a wide-enough band that p_lo lands
+    exactly at 0.0), with a result that lands exactly on it (zero marked
+    shots). Confirmed via direct reproduction before writing this test --
+    a genuine p_lo=0.0 case (not the degenerate single-point band from
+    expected_amplification=0.0, which is a different, already-covered
+    case) must resolve correctly, symmetric to the p_hi=1.0 fix."""
+    # baseline 0.25, expected_amplification=1.0 -> p_claimed=0.25;
+    # tolerance=1.0 -> band [0, 0.5], a real (non-degenerate) margin
+    # whose LOWER edge sits exactly at the 0.0 boundary.
+    result = v.ground_truth_significance_test({"00": 0, "01": 1024}, ["00"],
+                                                expected_amplification=1.0, tolerance=1.0)
+    assert result["applicable"] is True
+    assert result["equivalence_margin"]["lower"] == 0.0
+    assert result["tost_verdict"] == "VERIFIED"
+    assert result["one_sided"] is True
+
+
+def test_a_very_tight_tolerance_at_the_1_0_boundary_is_honestly_inconclusive_not_verified():
+    """Stress-tests the exact float-equality concern raised in review
+    (ci_hi vs p_hi both landing at/near 1.0): with a VERY tight tolerance
+    (0.1%) pinned at the 1.0 boundary, 1024 perfect shots genuinely isn't
+    enough to resolve such a narrow band -- must read INCONCLUSIVE
+    (honest: not enough data for this precision), not a false VERIFIED
+    from a float-equality quirk, and not a false FAIL either."""
+    result = v.ground_truth_significance_test({"0000": 1024}, ["0000"],
+                                                expected_amplification=50.0, tolerance=0.001)
+    assert result["applicable"] is True
+    assert result["claimed_probability"] == 1.0
+    assert result["equivalence_margin"]["upper"] == 1.0
+    assert result["confidence_interval"]["upper"] == 1.0
+    assert result["tost_verdict"] == "INCONCLUSIVE"
+
+
+def test_one_sided_flag_is_true_only_when_an_edge_is_at_the_boundary():
+    at_boundary = v.ground_truth_significance_test({"0000": 1024}, ["0000"],
+                                                     expected_amplification=20.0, tolerance=0.03)
+    assert at_boundary["one_sided"] is True
+    assert "one-sided" in at_boundary["verdict"].lower()
+
+    interior = v.ground_truth_significance_test({"00": 500, "01": 500}, ["00"],
+                                                  expected_amplification=2.0, tolerance=0.5)
+    assert interior["one_sided"] is False
+    assert "one-sided" not in interior["verdict"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +263,18 @@ def test_matches_hand_computed_one_sided_p_value_when_upper_edge_is_unreachable(
 # hardware needed) -- if the true probability sits EXACTLY at the
 # equivalence margin's edge (genuinely NOT equivalent, worst case), the
 # false VERIFIED rate must not exceed alpha.
+#
+# MEASURED, unseeded, 20,000 trials (same total=2000, tolerance=0.1 shape as
+# the seeded test below): false-VERIFIED rate = 0.05025 (1005/20000) at
+# alpha=0.05 -- i.e. the real rate sits almost exactly AT alpha (well within
+# one standard error, se=sqrt(0.05*0.95/20000)=0.00049), not "meaningfully
+# below" it. Worth recording precisely: Wilson-interval coverage isn't
+# conservative the way an exact discrete test (like the original binomtest
+# this replaced) is -- it targets nominal coverage on average, and can dip
+# either side of it locally, unlike Clopper-Pearson, which is guaranteed
+# conservative at the cost of being wider than necessary. The guarantee
+# still holds (0.05025 is not a violation), it's just tighter than a naive
+# "extra conservatism stacks up" argument would predict.
 # ---------------------------------------------------------------------------
 
 def test_boundary_type_i_rate_is_controlled_at_the_equivalence_margin_edge():

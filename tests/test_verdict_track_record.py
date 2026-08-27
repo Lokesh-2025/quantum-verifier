@@ -82,3 +82,37 @@ def test_response_includes_ionq_only_scope_caveat(temp_db):
     _record_and_complete("ionq", "forte-1", predicted=2.0, real=2.1)
     result = memory.verdict_track_record()
     assert "IonQ" in result["scope_caveat"]
+
+
+def test_known_synthetic_sources_are_excluded_from_the_real_track_record(temp_db):
+    """Added 2026-08-27, after a real audit found 42 of 45 rows in the
+    REAL predictions table were an identical repeated test fixture
+    (source='unit_test'), silently making a live '1.0 hit rate' 93%
+    synthetic. _NON_REAL_SOURCES must keep that from ever counting again,
+    no matter how a caller's test data ends up tagged."""
+    pred = memory.record_prediction("OPENQASM 2.0;", "ionq", "forte-1",
+                                     predicted_amplification=10.0, source="unit_test")
+    memory.record_real_result(pred["prediction_id"], real_amplification=8.0)  # would be a "hit"
+    result = memory.verdict_track_record()
+    assert result["n"] == 0, "a known-synthetic source must never count toward the real track record"
+
+
+def test_a_mix_of_real_and_synthetic_only_counts_the_real_ones(temp_db):
+    _record_and_complete("ionq", "forte-1", predicted=2.0, real=2.1)  # real, default source
+    pred = memory.record_prediction("OPENQASM 2.0;", "ionq", "forte-1",
+                                     predicted_amplification=10.0, source="unit_test")
+    memory.record_real_result(pred["prediction_id"], real_amplification=8.0)
+    result = memory.verdict_track_record()
+    assert result["overall_n"] == 1
+
+
+def test_memory_summary_also_excludes_known_synthetic_sources(temp_db):
+    """Same filter, same reason, the other function that answers 'how
+    trustworthy is this tool' — must not silently diverge from
+    verdict_track_record's behavior."""
+    pred = memory.record_prediction("OPENQASM 2.0;", "ionq", "forte-1",
+                                     predicted_amplification=10.0, source="unit_test")
+    memory.record_real_result(pred["prediction_id"], real_amplification=8.0)
+    result = memory.memory_summary()
+    assert result["predictions_with_real_results"] == 0
+    assert result["total_predictions_ever_recorded"] == 0

@@ -100,3 +100,23 @@ def test_limit_caps_returned_disagreements(temp_db):
     result = memory.shadow_mode_disagreement_log(limit=2)
     assert result["total_comparisons_logged"] == 5
     assert result["disagreement_count"] == 2
+
+
+def test_source_defaults_to_verify_experiment_and_is_surfaced(temp_db):
+    """The real call site (core/verifier.py's verify()) never passes
+    source explicitly -- the default must be the accurate, real label."""
+    memory.record_shadow_mode_comparison("ionq", "forte-1", "OPENQASM 2.0;",
+                                          _old(True), _new(False))
+    row = memory.shadow_mode_disagreement_log()["disagreements"][0]
+    assert row["source"] == "verify_experiment"
+
+
+def test_known_synthetic_source_is_excluded_from_the_log(temp_db):
+    """Same provenance guarantee as memory_summary()/verdict_track_record()
+    (see the 2026-08-27 predictions-table audit) -- a row tagged with a
+    known-synthetic source must never count toward this log either."""
+    memory.record_shadow_mode_comparison("ionq", "forte-1", "OPENQASM 2.0;",
+                                          _old(True), _new(False), source="unit_test")
+    result = memory.shadow_mode_disagreement_log()
+    assert result["total_comparisons_logged"] == 0
+    assert result["disagreement_count"] == 0
