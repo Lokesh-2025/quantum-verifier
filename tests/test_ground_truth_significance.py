@@ -264,17 +264,27 @@ def test_matches_hand_computed_one_sided_p_value_when_upper_edge_is_unreachable(
 # equivalence margin's edge (genuinely NOT equivalent, worst case), the
 # false VERIFIED rate must not exceed alpha.
 #
-# MEASURED, unseeded, 20,000 trials (same total=2000, tolerance=0.1 shape as
-# the seeded test below): false-VERIFIED rate = 0.05025 (1005/20000) at
-# alpha=0.05 -- i.e. the real rate sits almost exactly AT alpha (well within
-# one standard error, se=sqrt(0.05*0.95/20000)=0.00049), not "meaningfully
-# below" it. Worth recording precisely: Wilson-interval coverage isn't
-# conservative the way an exact discrete test (like the original binomtest
-# this replaced) is -- it targets nominal coverage on average, and can dip
-# either side of it locally, unlike Clopper-Pearson, which is guaranteed
-# conservative at the cost of being wider than necessary. The guarantee
-# still holds (0.05025 is not a violation), it's just tighter than a naive
-# "extra conservatism stacks up" argument would predict.
+# MEASURED, unseeded, same total=2000/tolerance=0.1 shape as the seeded test
+# below, at two sample sizes -- reporting both rather than only the newer,
+# larger one, because the two disagree about direction and that disagreement
+# is itself the finding:
+#
+#   20,000 trials:  false-VERIFIED rate = 0.05025 (1005/20,000)   -- +0.51 SE
+#   100,000 trials: false-VERIFIED rate = 0.05131 (5,131/100,000) -- +1.90 SE
+#   (SE = sqrt(alpha*(1-alpha)/N); alpha=0.05)
+#
+# At 20k the rate read as "almost exactly at alpha." At 100k -- five times
+# the data, so a tighter estimate of the same true quantity -- it reads
+# as ~1.9 standard errors ABOVE alpha, not below. That is the opposite of
+# what an "extra conservatism stacks up" argument (Wilson conservatism +
+# binomial discreteness) would have predicted, and the more precise (100k)
+# number should be trusted over the earlier one, not averaged with it.
+# 1.9 SE is not a formal violation (informal 2-SE reference point not
+# crossed), but it is real evidence AGAINST "the true rate is comfortably
+# under alpha," not evidence for it. Recorded precisely, characterization
+# only -- see the calling task's constraints for why no threshold changes
+# here. This number should factor into tomorrow's graduation-criteria
+# discussion, not be treated as a settled pass.
 # ---------------------------------------------------------------------------
 
 def test_boundary_type_i_rate_is_controlled_at_the_equivalence_margin_edge():
