@@ -44,6 +44,19 @@ def _connect():
             real_result_recorded_at TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shadow_mode_comparisons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            target_device TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            old_check_within_tolerance INTEGER,
+            new_check_equivalent_at_alpha INTEGER,
+            new_check_p_value REAL,
+            agree INTEGER NOT NULL
+        )
+    """)
     conn.commit()
     return conn
 
@@ -244,4 +257,79 @@ def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> dict:
         "note": f"A 'hit' means the real result landed within {int(tolerance*100)}% of the "
                 "prediction — the same logic that would have produced a GO verdict at "
                 "verification time. This is the tool's own real accuracy record, not a claim.",
+    }
+
+
+def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string: str,
+                                   old_check: dict, new_check: dict) -> None:
+    """
+    Added 2026-08-27, per external review's item 4 — called the "cheapest
+    thing on the list and probably the most informative." Every time
+    verify() runs both ground_truth_check (the old tolerance-band
+    heuristic) and ground_truth_significance_test (the real TOST
+    equivalence test), log whether they agreed, for free, before either
+    one is trusted to block on its own. Doesn't need a real hardware
+    result to be useful — it's comparing two checks against each other,
+    both already computed from the same simulated/hardware-aware result.
+
+    Silently no-ops if either check wasn't applicable — nothing to compare.
+    """
+    if not (old_check.get("applicable") and new_check.get("applicable")):
+        return
+
+    import datetime
+    old_verdict = old_check["within_tolerance"]
+    new_verdict = new_check["equivalent_at_alpha"]
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO shadow_mode_comparisons (timestamp, provider, target_device, circuit_hash, "
+        "old_check_within_tolerance, new_check_equivalent_at_alpha, new_check_p_value, agree) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (datetime.datetime.now(datetime.timezone.utc).isoformat(), provider, target_device,
+         _circuit_hash(qasm_string), int(old_verdict), int(new_verdict),
+         new_check["p_value"], int(old_verdict == new_verdict)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def shadow_mode_disagreement_log(limit: int = 50) -> dict:
+    """
+    Read back the shadow-mode comparison log. The whole point of shadow
+    mode is reviewing this after real experiments accumulate — this
+    doesn't recommend anything on its own, it just surfaces the raw
+    disagreements so a human can look at them and decide whether the new
+    equivalence test or the old tolerance band was right, case by case.
+    """
+    conn = _connect()
+    total = conn.execute("SELECT COUNT(*) FROM shadow_mode_comparisons").fetchone()[0]
+    disagreements = conn.execute(
+        "SELECT timestamp, provider, target_device, circuit_hash, old_check_within_tolerance, "
+        "new_check_equivalent_at_alpha, new_check_p_value FROM shadow_mode_comparisons "
+        "WHERE agree = 0 ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+
+    disagreement_rows = [
+        {
+            "timestamp": ts, "provider": prov, "target_device": dev, "circuit_hash": ch,
+            "old_check_said_within_tolerance": bool(old), "new_check_said_equivalent": bool(new),
+            "new_check_p_value": p,
+        }
+        for ts, prov, dev, ch, old, new, p in disagreements
+    ]
+
+    return {
+        "total_comparisons_logged": total,
+        "disagreement_count": len(disagreement_rows),
+        "disagreements": disagreement_rows,
+        "note": (
+            "No comparisons logged yet — both checks need to run together (via verify(), with "
+            "expected_marked_bitstrings and expected_amplification supplied) before there's "
+            "anything here." if total == 0 else
+            f"{len(disagreement_rows)} of {total} logged comparisons disagreed (showing up to "
+            f"{limit} most recent). Per the graduation criteria on aggregate_significance: read "
+            "these after real experiments accumulate, not synthetic ones, before trusting either "
+            "check to block on its own."
+        ),
     }

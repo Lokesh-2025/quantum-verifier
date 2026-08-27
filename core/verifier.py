@@ -497,27 +497,48 @@ def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
 
 
 def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: list,
-                                    expected_amplification: float) -> dict:
+                                    expected_amplification: float,
+                                    tolerance: float = 0.5, alpha: float = 0.05) -> dict:
     """
-    A real statistical test, added 2026-08-26 — ground_truth_check above
-    only ever checked "is the observed amplification within a fixed +/-50%
-    range," a rule of thumb, not a real hypothesis test. It never produced
-    an actual probability. This does: given the real observed counts, how
-    likely would a result at least this far from the claim be, by pure
-    chance, if the claim were exactly true?
+    A real statistical test -- but an EQUIVALENCE test, not a difference
+    test. Added 2026-08-26, REWRITTEN 2026-08-27 after external review
+    caught a real correctness bug in the first version.
 
-    Uses scipy's exact one-sample binomial test (not a normal
-    approximation, which can be unreliable at small shot counts — the same
-    reasoning required_shots_check already applies when deciding whether
-    an experiment even has enough shots to be conclusive). This is the
-    real p-value-producing check that was missing before any multiple-
-    comparisons correction work could make sense — see the "Group 2 is
-    currently empty" finding this was built to fix.
+    The first version tested H0: true_probability == p_claimed with an
+    exact binomial test, asking "is the observed rate DIFFERENT from the
+    claim?" That's the wrong question for a safety gate: real hardware is
+    always at least a little noisy, so that null is already known false
+    before a single shot is collected. As shots -> infinity, that kind of
+    test's p-value goes to 0 with probability 1, REGARDLESS of whether the
+    device is actually healthy -- it was measuring how many shots got
+    bought, not whether the circuit worked. A perfectly fine device would
+    "pass" at 1,024 shots and "hard fail" at 100,000 shots, same hardware,
+    same fidelity, opposite verdict. Backwards for a gate meant to get
+    stricter with more evidence, not looser.
 
-    Added ALONGSIDE ground_truth_check, not replacing it yet — this is
-    informational for now (kind="statistical", not wired to block verify()
-    on its own), so nothing about verify()'s existing behavior changes
-    until this has its own real track record.
+    What a verifier actually needs is TOST (two one-sided tests) --
+    H0 = "NOT equivalent" (true probability is more than `tolerance` away
+    from the claim), H1 = "equivalent" (within it). Implemented as two
+    one-sided exact binomial tests against the tolerance band's lower and
+    upper edge; the TOST p-value is the max of the two (standard
+    construction -- equivalence is only claimed once BOTH one-sided nulls
+    are rejected). This makes `tolerance` do double duty: it's still the
+    same band ground_truth_check already used, now also the actual
+    equivalence margin behind a real p-value.
+
+    IMPORTANT — the direction flipped from the first version: a SMALL
+    p_value here means strong evidence FOR equivalence (good), not
+    evidence of a problem. More shots on a genuinely healthy device now
+    shrink the p-value (easier to confirm "close enough") instead of
+    driving it to zero. This also means Holm-Bonferroni correction
+    (aggregate_significance, below) now makes this check MORE conservative
+    in the safe direction: harder to falsely declare equivalence when
+    cherry-picking across a batch, not easier to wave through a real
+    problem.
+
+    Still informational for now (kind="statistical", not wired to block
+    verify() on its own) -- see the "graduation criteria" note on
+    aggregate_significance for what needs to be true before that changes.
     """
     from scipy.stats import binomtest
 
@@ -538,8 +559,19 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
     p_claimed = min(1.0, baseline_p * expected_amplification)
     observed_amp = (marked_shots / total) / baseline_p
 
-    test_result = binomtest(marked_shots, total, p_claimed, alternative="two-sided")
-    p_value = float(test_result.pvalue)  # plain Python float/bool, not numpy types -- JSON serialization needs this
+    p_lo = max(0.0, p_claimed * (1 - tolerance))
+    p_hi = min(1.0, p_claimed * (1 + tolerance))
+    if p_hi <= p_lo:
+        return {"applicable": False,
+                "note": f"Degenerate equivalence band [{p_lo}, {p_hi}] — this claim and tolerance "
+                        "leave no real margin to test equivalence against."}
+
+    # Two one-sided tests: is the true rate credibly BELOW the upper edge,
+    # and credibly ABOVE the lower edge? Both must reject for equivalence.
+    p_upper = float(binomtest(marked_shots, total, p_hi, alternative="less").pvalue)
+    p_lower = float(binomtest(marked_shots, total, p_lo, alternative="greater").pvalue)
+    tost_p_value = max(p_upper, p_lower)
+    equivalent = tost_p_value < alpha
 
     return {
         "applicable": True,
@@ -548,17 +580,20 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
         "total_shots": total,
         "baseline_probability": round(baseline_p, 6),
         "claimed_probability": round(p_claimed, 6),
+        "equivalence_margin": {"lower": round(p_lo, 6), "upper": round(p_hi, 6)},
         "observed_amplification": round(observed_amp, 4),
         "expected_amplification": expected_amplification,
-        "p_value": round(p_value, 6),
-        "significant_at_0.05": p_value < 0.05,
+        "p_value": round(tost_p_value, 6),
+        "alpha": alpha,
+        "equivalent_at_alpha": equivalent,
         "verdict": (
-            f"The real observed result (p={p_value:.4g}) is NOT statistically consistent with "
-            f"the claimed {expected_amplification}x amplification — this isn't just outside a "
-            f"tolerance band, it's an actual low-probability outcome under the claim."
-            if p_value < 0.05 else
-            f"The real observed result is statistically consistent with the claimed "
-            f"{expected_amplification}x amplification (p={p_value:.4g})."
+            f"The real observed result is statistically confirmed equivalent to the claimed "
+            f"{expected_amplification}x amplification within tolerance (TOST p={tost_p_value:.4g}) "
+            "— not just 'not proven different', genuinely proven close enough."
+            if equivalent else
+            f"The real observed result is NOT confirmed equivalent to the claimed "
+            f"{expected_amplification}x amplification (TOST p={tost_p_value:.4g}) — either it's "
+            "really off, or there isn't yet enough data to confirm it's close enough."
         ),
     }
 
@@ -621,7 +656,7 @@ def required_shots_check(n_marked: int, expected_amplification: float, n_qubits:
     }
 
 
-def holm_bonferroni_adjust(p_values: list) -> list:
+def holm_bonferroni_adjust(p_values: list, family_size: int = None) -> list:
     """
     Real, standard fix for a real problem: run enough independent
     hypothesis tests and some will look "significant" at p<0.05 by pure
@@ -636,16 +671,34 @@ def holm_bonferroni_adjust(p_values: list) -> list:
     since each successive test only has to clear a threshold based on how
     many tests are still ahead of it, not the full family count every time.
 
-    Returns adjusted p-values in the SAME order as the input -- compare
+    family_size: the TRUE number of tests in the family this p_values list
+    was drawn from (e.g. every circuit in a sweep) -- NOT inferred from
+    len(p_values) unless you pass it explicitly. This matters: a caller
+    who quietly drops the boring results before calling and submits only
+    the interesting one would get it under-corrected if the multiplier
+    came from what was submitted rather than what actually exists. Pass
+    family_size explicitly for anything that isn't a direct, complete,
+    non-gameable list. Defaults to len(p_values) only for that direct case.
+    Raises if family_size is smaller than what was actually submitted --
+    that can never be legitimate.
+
+    Returns adjusted p-values in the SAME order as p_values -- compare
     each directly against your alpha (e.g. < 0.05); the correction has
     already been folded in, don't re-divide by the family size yourself.
     """
-    m = len(p_values)
-    if m == 0:
+    m_submitted = len(p_values)
+    if m_submitted == 0:
         return []
 
-    ranked = sorted(range(m), key=lambda i: p_values[i])
-    adjusted = [0.0] * m
+    m = family_size if family_size is not None else m_submitted
+    if m < m_submitted:
+        raise ValueError(
+            f"family_size ({m}) is smaller than the number of p-values submitted "
+            f"({m_submitted}) — family_size must cover at least every test submitted."
+        )
+
+    ranked = sorted(range(m_submitted), key=lambda i: p_values[i])
+    adjusted = [0.0] * m_submitted
     running_max = 0.0
     for rank, orig_idx in enumerate(ranked):
         multiplier = m - rank
@@ -655,7 +708,7 @@ def holm_bonferroni_adjust(p_values: list) -> list:
     return adjusted
 
 
-def aggregate_significance(verify_results: list, alpha: float = 0.05) -> dict:
+def aggregate_significance(verify_results: list, alpha: float = 0.05, family_size: int = None) -> dict:
     """
     Takes a BATCH of verify() results -- one per circuit in an angle sweep,
     one per device, one per qubit pair, anywhere the same kind of
@@ -670,11 +723,35 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05) -> dict:
     "this one is STILL surprising after accounting for how many other
     claims were being tested at the same time."
 
+    family_size: the TRUE size of the batch this came from (e.g. every
+    circuit in the sweep, not just the ones passed to this call). Declare
+    it explicitly whenever the caller could have dropped results before
+    calling -- inferring it from len(verify_results) lets someone quietly
+    submit only the good-looking subset and get under-corrected
+    "significance," which is p-hacking with a function call. Defaults to
+    the number of applicable results only when not given -- safe ONLY for
+    a batch you know is genuinely complete.
+
+    NOTE for future work: if a within-experiment statistical family ever
+    gets built (correcting across multiple checks inside one verify() call,
+    as opposed to this function's across-experiments correction), do NOT
+    feed already-Holm-adjusted p-values from one level into a correction at
+    the other level -- that double-corrects and silently makes the gate
+    over-conservative with no error or warning. Pick one level per p-value.
+
     Results with no applicable statistical test (ground_truth_significance_test
     missing or not applicable -- e.g. no expected_marked_bitstrings supplied,
     or the IBM path, which returns a fidelity estimate rather than counts)
     are passed through untouched and excluded from the correction -- they
     were never really part of the family being tested.
+
+    Graduation criteria before this (or ground_truth_significance_test)
+    gets wired to actually block verify(): null p-value distribution
+    measured on real archived results (not yet possible -- the check is
+    brand new, there's no history yet); shot-count sensitivity confirmed
+    stable on real data; a shadow-mode disagreement log between this check
+    and the older ground_truth_check tolerance band, reviewed after enough
+    real experiments accumulate.
     """
     raw_p_by_index = {
         i: r["ground_truth_significance_test"]["p_value"]
@@ -683,7 +760,7 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05) -> dict:
     }
     ordered_indices = list(raw_p_by_index.keys())
     raw_p = [raw_p_by_index[i] for i in ordered_indices]
-    adjusted_p = holm_bonferroni_adjust(raw_p)
+    adjusted_p = holm_bonferroni_adjust(raw_p, family_size=family_size)
     adjusted_by_index = dict(zip(ordered_indices, adjusted_p))
 
     per_result = []
@@ -702,24 +779,30 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05) -> dict:
         else:
             per_result.append({"index": i, "applicable": False})
 
-    n_family = len(raw_p)
+    submitted_count = len(raw_p)
+    n_family = family_size if family_size is not None else submitted_count
     n_sig_before = sum(1 for p in raw_p if p < alpha)
     n_sig_after = sum(1 for a in adjusted_p if a < alpha)
 
     return {
         "family_size": n_family,
+        "submitted_count": submitted_count,
         "alpha": alpha,
         "significant_before_correction": n_sig_before,
         "significant_after_correction": n_sig_after,
         "results": per_result,
         "verdict": (
             "No statistical tests in this batch were applicable -- nothing to correct."
-            if n_family == 0 else
-            f"Of {n_family} results tested, {n_sig_before} looked significant on their own, "
-            f"but only {n_sig_after} remain significant once corrected for testing {n_family} "
-            "claims at once."
+            if submitted_count == 0 else
+            f"Of {submitted_count} results tested (declared family size {n_family}), "
+            f"{n_sig_before} looked significant on their own, but only {n_sig_after} remain "
+            f"significant once corrected for the whole family."
             + (" These are the false alarms multiple-comparisons correction exists to catch."
                if n_sig_before > n_sig_after else "")
+            + (f" NOTE: only {submitted_count} of {n_family} declared family members were "
+               "submitted to this call — results not submitted are not evaluated, only "
+               "accounted for in the correction strength of the ones that were."
+               if submitted_count < n_family else "")
         ),
     }
 
@@ -765,11 +848,16 @@ CHECK_TAXONOMY = {
     },
     "ground_truth_significance_test": {
         "kind": "statistical",
-        "rationale": "Exact one-sample binomial hypothesis test (scipy "
-                      "binomtest) -- produces a real p-value against a "
-                      "well-defined null hypothesis. Currently the only "
-                      "check in this table that Holm-Bonferroni correction "
-                      "(aggregate_significance, above) actually applies to.",
+        "rationale": "TOST equivalence test (two one-sided exact binomial "
+                      "tests) -- produces a real p-value against a "
+                      "well-defined null hypothesis ('not equivalent to the "
+                      "claim within tolerance'), not a difference test "
+                      "(rewritten 2026-08-27 after review: a plain "
+                      "difference test's p-value goes to 0 for ANY real "
+                      "device as shots increase, which is backwards for a "
+                      "safety gate). Currently the only check in this table "
+                      "that Holm-Bonferroni correction (aggregate_significance, "
+                      "above) actually applies to.",
     },
     "falsify.isolated_effect_size": {
         "kind": "heuristic",
@@ -880,7 +968,11 @@ def verify(
         # tolerance-band check rather than replacing it yet.
         result["ground_truth_significance_test"] = ground_truth_significance_test(
             hw.get("counts"), expected_marked_bitstrings, expected_amplification,
+            amplification_tolerance,
         )
+        from core.memory import record_shadow_mode_comparison
+        record_shadow_mode_comparison(provider, target_device, qasm_string,
+                                       gt, result["ground_truth_significance_test"])
         if gt.get("applicable") and not gt["within_tolerance"]:
             return {**result, "verdict": "BLOCK", "reason": gt["verdict"]}
     else:

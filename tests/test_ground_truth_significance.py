@@ -1,14 +1,14 @@
 """
-Tests for ground_truth_significance_test (core/verifier.py), added
-2026-08-26 — the real statistical hypothesis test that was missing before
-any multiple-comparisons correction work could make sense. The old
-ground_truth_check only ever compared against a fixed +/-50% tolerance
-band, never produced a real probability. This uses scipy's exact
-one-sample binomial test instead.
+Tests for ground_truth_significance_test (core/verifier.py).
 
-Pure math tests here (scipy's binomtest itself is well-established and
-doesn't need re-proving) — what actually needs testing is the wrapper
-logic I wrote around it: baseline probability, clamping, edge cases.
+Added 2026-08-26 as a plain difference test (H0: observed == claimed).
+REWRITTEN 2026-08-27 after external review caught a real correctness bug:
+a difference test's p-value goes to 0 with probability 1 as shots grow,
+for ANY real (noisy) device, regardless of whether it's actually healthy —
+backwards for a safety gate that should get MORE confident with more data,
+not less. Rewritten as TOST (two one-sided tests): H0 = "not equivalent to
+the claim within tolerance". Small p_value now means strong evidence FOR
+equivalence — the opposite direction from the old version.
 """
 import os
 import sys
@@ -35,41 +35,54 @@ def test_not_applicable_when_no_marked_bitstrings():
     assert result["applicable"] is False
 
 
-def test_matches_scipy_binomtest_directly_on_a_known_case():
-    """Regression/sanity: our wrapper's p-value must exactly match calling
-    scipy's binomtest ourselves with the same real numbers, by hand."""
+def test_not_applicable_when_equivalence_band_is_degenerate():
+    """expected_amplification=0 -> claimed_probability=0 -> the tolerance
+    band collapses to a single point -- nothing meaningful to test."""
+    result = v.ground_truth_significance_test({"0": 500, "1": 500}, ["0"],
+                                                expected_amplification=0.0)
+    assert result["applicable"] is False
+
+
+def test_matches_hand_computed_tost_directly_on_a_known_case():
+    """Regression/sanity: our TOST wrapper's p-value must exactly match
+    computing the two one-sided binomial tests ourselves, by hand, and
+    taking the max — the standard TOST construction."""
     counts = {"00": 450, "01": 50, "10": 30, "11": 20}
-    result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=1.5)
+    result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=1.5,
+                                                tolerance=0.2)
     total = 550
-    baseline_p = 1 / 4  # 1 marked bitstring out of 2^2 = 4 possibilities
+    baseline_p = 1 / 4
     p_claimed = min(1.0, baseline_p * 1.5)
-    expected = binomtest(450, total, p_claimed, alternative="two-sided").pvalue
+    p_lo = p_claimed * (1 - 0.2)
+    p_hi = p_claimed * (1 + 0.2)
+    p_upper = binomtest(450, total, p_hi, alternative="less").pvalue
+    p_lower = binomtest(450, total, p_lo, alternative="greater").pvalue
+    expected = max(p_upper, p_lower)
     assert result["p_value"] == round(expected, 6)
 
 
-def test_result_matching_claim_exactly_gives_a_large_p_value():
-    """A result landing almost exactly where the claim predicts should be
-    'boring' -- a high p-value, not flagged as unusual."""
-    # baseline 1/4, claim 2x -> claimed_probability = 0.5. Land almost
-    # exactly on 0.5 with a large sample.
+def test_result_matching_claim_closely_gives_a_small_p_value_and_passes():
+    """A result landing almost exactly on the claim, with a large sample,
+    should be CONFIDENTLY declared equivalent -- small TOST p-value,
+    equivalent_at_alpha True."""
     counts = {"00": 5000, "01": 1667, "10": 1667, "11": 1666}
-    result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=2.0)
+    result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=2.0,
+                                                tolerance=0.5)
+    assert result["applicable"] is True
+    assert result["p_value"] < 0.05
+    assert result["equivalent_at_alpha"] is True
+
+
+def test_result_wildly_off_from_claim_gives_a_large_p_value_and_fails():
+    """A result nowhere near the claim (even clamped to the claim's max
+    possible probability) must NOT be confirmed equivalent -- large TOST
+    p-value, equivalent_at_alpha False."""
+    counts = {"00": 2600, "01": 2500, "10": 2500, "11": 2400}
+    result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=10.0,
+                                                tolerance=0.5)
     assert result["applicable"] is True
     assert result["p_value"] > 0.05
-    assert result["significant_at_0.05"] is False
-
-
-def test_result_wildly_off_from_claim_gives_a_tiny_p_value():
-    """A result nowhere near the claim, with a large sample size (so it's
-    not just noise), should produce a genuinely tiny p-value."""
-    # Claim: 10x amplification (claimed_probability = min(1, 0.25*10) = 1.0).
-    # Real result: barely above baseline. With 10,000 shots this is not
-    # remotely consistent with "should be ~100% marked".
-    counts = {"00": 2600, "01": 2500, "10": 2500, "11": 2400}
-    result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=10.0)
-    assert result["applicable"] is True
-    assert result["p_value"] < 0.001
-    assert result["significant_at_0.05"] is True
+    assert result["equivalent_at_alpha"] is False
 
 
 def test_amplification_implying_over_100_percent_is_clamped():
@@ -83,8 +96,8 @@ def test_amplification_implying_over_100_percent_is_clamped():
 
 
 def test_output_is_marked_as_statistical_kind():
-    """The 'kind' field matters for the future triage/family-grouping work
-    -- this check must self-identify as belonging in the real-statistics
+    """The 'kind' field matters for the taxonomy/family-grouping work --
+    this check must self-identify as belonging in the real-statistics
     group, not silently be lumped in with heuristics."""
     counts = {"00": 500, "01": 500}
     result = v.ground_truth_significance_test(counts, ["00"], expected_amplification=2.0)
@@ -96,6 +109,29 @@ def test_multiple_marked_bitstrings_sums_correctly():
     result = v.ground_truth_significance_test(counts, ["00", "11"], expected_amplification=1.0)
     assert result["marked_shots"] == 500
     assert result["baseline_probability"] == 0.5  # 2 marked out of 4
+
+
+def test_more_shots_makes_a_healthy_device_pass_more_confidently_not_less():
+    """The exact bug this rewrite fixes, demonstrated directly: the old
+    difference-test version's p-value -> 0 as shots -> infinity for ANY
+    real device, flipping a healthy device's verdict from pass to
+    hard-fail purely from sample size. Here: a device landing at 48%
+    against an ideal 50% claim (well within a 10% tolerance band) at three
+    shot counts. The TOST p-value must SHRINK as shots increase, and the
+    verdict must never flip to 'not equivalent' as data accumulates on an
+    unchanged, genuinely-within-tolerance device."""
+    p_values = []
+    for shots in (1024, 8192, 100_000):
+        marked = round(shots * 0.48)
+        counts = {"0": marked, "1": shots - marked}
+        result = v.ground_truth_significance_test(counts, ["0"], expected_amplification=1.0,
+                                                    tolerance=0.1)
+        assert result["equivalent_at_alpha"] is True, f"flipped to not-equivalent at {shots} shots"
+        p_values.append(result["p_value"])
+    assert p_values == sorted(p_values, reverse=True), (
+        "TOST p-value should shrink as shots increase for an unchanged, healthy device, "
+        f"got {p_values}"
+    )
 
 
 # ---------------------------------------------------------------------------

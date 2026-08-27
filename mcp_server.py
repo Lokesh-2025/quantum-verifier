@@ -16,6 +16,7 @@ from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
 from core.memory import verdict_track_record as _verdict_track_record
+from core.memory import shadow_mode_disagreement_log as _shadow_mode_disagreement_log
 from core.intelligence import recommend_tolerance as _recommend_tolerance
 from core.templates import run_ghz_parity_check as _run_ghz_parity_check
 from core.templates import run_graph_coloring_search as _run_graph_coloring_search
@@ -70,7 +71,8 @@ def verify_experiment(
 
 
 @mcp.tool()
-def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05) -> str:
+def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05,
+                                      family_size: int = None) -> str:
     """
     Run this after collecting a BATCH of verify_experiment results — one per
     circuit in an angle sweep, one per device, one per qubit pair, any set
@@ -84,13 +86,23 @@ def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05) 
     going on — this tells you which "significant" results survive once
     that's accounted for.
 
+    ALWAYS pass family_size explicitly when verify_results might not be the
+    complete batch (e.g. you're calling this partway through a sweep, or
+    only forwarding the interesting-looking results). Leaving it out infers
+    the family size from len(verify_results), which under-corrects if the
+    real batch was bigger than what got submitted here — dropping the
+    boring results before calling this is p-hacking with a tool call.
+
     Args:
         verify_results : a list of the dict results returned by
                           verify_experiment (parse the JSON string back into
                           a dict first if it was serialized)
         alpha           : family-wise significance threshold (default 0.05)
+        family_size     : the TRUE number of tests in this family — declare
+                           it, don't let it be inferred, for any batch that
+                           isn't guaranteed complete
     """
-    return json.dumps(_aggregate_significance(verify_results, alpha), indent=2)
+    return json.dumps(_aggregate_significance(verify_results, alpha, family_size), indent=2)
 
 
 @mcp.tool()
@@ -104,6 +116,22 @@ def check_taxonomy() -> str:
     family — the other two were never testing a probability to begin with.
     """
     return json.dumps(_check_taxonomy(), indent=2)
+
+
+@mcp.tool()
+def shadow_mode_disagreement_log(limit: int = 50) -> str:
+    """
+    Every verify_experiment call with a known-answer claim quietly logs
+    whether the old tolerance-band check (ground_truth_check) and the new
+    statistical equivalence test (ground_truth_significance_test) agreed —
+    for free, without needing a real hardware result. This reads that log
+    back: how many comparisons so far, how many disagreed, and the details
+    of each disagreement (which side said what).
+
+    Before either check is trusted enough to block verify() on its own,
+    review this after real experiments accumulate — not synthetic ones.
+    """
+    return json.dumps(_shadow_mode_disagreement_log(limit), indent=2)
 
 
 @mcp.tool()

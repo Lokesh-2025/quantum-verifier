@@ -10,7 +10,10 @@ p<0.05 just by chance, even if nothing real is going on. Holm-Bonferroni
 controls that family-wise false-alarm rate.
 """
 import os
+import random
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -64,6 +67,49 @@ def test_preserves_input_order_not_sorted_order():
     assert adjusted[1] == min(adjusted)
 
 
+def test_family_size_can_be_declared_larger_than_submitted_results():
+    """Guards against exactly the bug flagged in review: 'm' must come
+    from an explicitly declared family_size, not silently from how many
+    p-values happen to get submitted -- otherwise a caller can drop the
+    boring results and have the interesting one under-corrected."""
+    raw = [0.01]
+    adjusted_inferred = v.holm_bonferroni_adjust(raw)                    # m inferred = 1
+    adjusted_declared = v.holm_bonferroni_adjust(raw, family_size=20)    # m declared = 20
+    assert adjusted_inferred == [0.01]
+    assert adjusted_declared == [0.2]  # 20 * 0.01, correctly harsher
+    assert adjusted_declared[0] > adjusted_inferred[0]
+
+
+def test_family_size_smaller_than_submitted_count_is_rejected():
+    """Can never be legitimate -- you can't declare a family smaller than
+    the number of tests you're actually submitting from it."""
+    with pytest.raises(ValueError):
+        v.holm_bonferroni_adjust([0.01, 0.02, 0.03], family_size=2)
+
+
+def test_monte_carlo_family_wise_error_rate_is_controlled():
+    """Validates the actual GUARANTEE, not just behavior on hand-built
+    inputs: under the null (every p-value genuinely random/uniform, no
+    real effects anywhere), the probability of getting AT LEAST ONE false
+    "significant" result after correction must not exceed alpha, across
+    many repeated trials. Seeded for reproducibility."""
+    rng = random.Random(1234)
+    trials = 5000
+    m = 10
+    alpha = 0.05
+    false_positive_trials = 0
+    for _ in range(trials):
+        raw = [rng.random() for _ in range(m)]
+        adjusted = v.holm_bonferroni_adjust(raw)
+        if any(p < alpha for p in adjusted):
+            false_positive_trials += 1
+    observed_fwer = false_positive_trials / trials
+    assert observed_fwer <= alpha * 1.25, (
+        f"observed family-wise error rate {observed_fwer} exceeds the {alpha} guarantee "
+        "by more than sampling noise should allow"
+    )
+
+
 # ---------------------------------------------------------------------------
 # aggregate_significance — batch-level correction
 # ---------------------------------------------------------------------------
@@ -110,3 +156,17 @@ def test_empty_batch_reports_nothing_to_correct():
     agg = v.aggregate_significance([])
     assert agg["family_size"] == 0
     assert "nothing to correct" in agg["verdict"].lower()
+
+
+def test_aggregate_significance_uses_declared_family_size_not_submitted_count():
+    """The p-hacking guard at the aggregate level: submitting only 1 of a
+    declared 20-test family must correct as harshly as if all 20 were
+    visible, not as if this were a lone test on its own."""
+    results = [_fake_result(0.01)]
+    agg_lone = v.aggregate_significance(results)
+    agg_declared = v.aggregate_significance(results, family_size=20)
+    assert agg_lone["results"][0]["holm_adjusted_p_value"] == 0.01
+    assert agg_declared["results"][0]["holm_adjusted_p_value"] == 0.2
+    assert agg_declared["family_size"] == 20
+    assert agg_declared["submitted_count"] == 1
+    assert "1 of 20" in agg_declared["verdict"]
