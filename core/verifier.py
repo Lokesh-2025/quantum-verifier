@@ -724,6 +724,85 @@ def aggregate_significance(verify_results: list, alpha: float = 0.05) -> dict:
     }
 
 
+CHECK_TAXONOMY = {
+    "semantic_check": {
+        "kind": "structural",
+        "rationale": "Hard pass/fail on circuit well-formedness (parses, "
+                      "has measurements, etc.) -- no probability involved.",
+    },
+    "topology_check": {
+        "kind": "structural",
+        "rationale": "Hard pass/fail on heavy-hex degree limits (IBM) -- a "
+                      "fixed physical constraint, not a statistical claim.",
+    },
+    "gate_synthesis_check": {
+        "kind": "structural",
+        "rationale": "Flags disproportionate gate-count inflation after "
+                      "transpiling to the target's native gateset -- a "
+                      "compilation/structure problem (e.g. a missing gate "
+                      "equivalence, the RZZ->native-ZZ bug this check exists "
+                      "because of), not a claim about measurement outcomes.",
+    },
+    "required_shots_check": {
+        "kind": "structural",
+        "rationale": "A feasibility/power check computed BEFORE any data is "
+                      "collected -- 'could this claim ever be distinguishable "
+                      "at this shot count', not a test of observed results.",
+    },
+    "cross_check_fidelity_estimate": {
+        "kind": "heuristic",
+        "rationale": "Compares a predicted fidelity estimate against a "
+                      "simulated one within a fixed tolerance -- no formal "
+                      "null hypothesis or p-value behind the threshold.",
+    },
+    "ground_truth_check": {
+        "kind": "heuristic",
+        "rationale": "Compares observed amplification to the claim within a "
+                      "fixed tolerance band -- a rule of thumb, not a "
+                      "hypothesis test. Runs alongside "
+                      "ground_truth_significance_test (informational only, "
+                      "so far), not yet replaced by it.",
+    },
+    "ground_truth_significance_test": {
+        "kind": "statistical",
+        "rationale": "Exact one-sample binomial hypothesis test (scipy "
+                      "binomtest) -- produces a real p-value against a "
+                      "well-defined null hypothesis. Currently the only "
+                      "check in this table that Holm-Bonferroni correction "
+                      "(aggregate_significance, above) actually applies to.",
+    },
+    "falsify.isolated_effect_size": {
+        "kind": "heuristic",
+        "rationale": "core/control_experiment.py's control-arm check -- a "
+                      "raw effect-size number (marked-outcome rate, "
+                      "experimental vs control circuit), no significance "
+                      "test behind it yet. Same gap ground_truth_check had "
+                      "before ground_truth_significance_test was built; "
+                      "not yet fixed the same way.",
+    },
+}
+
+
+def check_taxonomy() -> dict:
+    """
+    The triage table: which of this pipeline's checks are structural (hard
+    pass/fail on circuit validity or feasibility), statistical (a real
+    p-value against a defined null hypothesis), or heuristic (a fixed
+    threshold/tolerance band with no formal test behind it).
+
+    This matters because Holm-Bonferroni correction (aggregate_significance,
+    above) is only valid within the statistical family -- applying it to
+    structural or heuristic checks wouldn't mean anything, since those were
+    never testing a probability to begin with.
+
+    Kept as a static, explicit registry (not derived by scanning code) so
+    it's a deliberate, reviewable claim about the pipeline's current state
+    -- adding a new check means consciously updating this table, not having
+    it silently drift out of date.
+    """
+    return CHECK_TAXONOMY
+
+
 # ---------------------------------------------------------------- orchestrator
 def verify(
     qasm_string: str,

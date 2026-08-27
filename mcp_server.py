@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from core.verifier import verify as _verify
 from core.verifier import aggregate_significance as _aggregate_significance
+from core.verifier import check_taxonomy as _check_taxonomy
 from core.control_experiment import falsify as _falsify
 from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
@@ -90,6 +91,19 @@ def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05) 
         alpha           : family-wise significance threshold (default 0.05)
     """
     return json.dumps(_aggregate_significance(verify_results, alpha), indent=2)
+
+
+@mcp.tool()
+def check_taxonomy() -> str:
+    """
+    The triage table: which of the verifier's checks are structural (hard
+    pass/fail on circuit validity/feasibility), statistical (a real p-value
+    against a defined null hypothesis), or heuristic (a fixed threshold/
+    tolerance band, no formal test behind it). Explains why
+    correct_for_multiple_comparisons only ever touches the statistical
+    family — the other two were never testing a probability to begin with.
+    """
+    return json.dumps(_check_taxonomy(), indent=2)
 
 
 @mcp.tool()
