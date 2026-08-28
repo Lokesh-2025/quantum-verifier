@@ -179,7 +179,7 @@ def ionq_submit_job(
     optimization_level: int = 1,
     expected_marked_bitstrings=None,
     expected_amplification=None,
-    amplification_tolerance: float = 0.5,
+    amplification_tolerance: float = None,
     confirm_real_hardware: bool = False,
 ) -> dict:
     """
@@ -191,6 +191,14 @@ def ionq_submit_job(
     than amplification_tolerance, the WHOLE batch is refused before
     anything touches real hardware. Real hardware additionally requires
     confirm_real_hardware=True.
+
+    amplification_tolerance defaults to None (added 2026-08-28) -- an
+    explicit value is always used exactly as given; None resolves to a
+    real, data-driven recommendation from this device's own real
+    prediction-vs-reality history (core.intelligence.recommend_tolerance),
+    falling back to the same plain 0.5 default when there isn't yet enough
+    real data. The resolved value is always visible in self_check, never
+    a silent substitution.
     """
     api_key = os.getenv("IONQ_API_KEY")
     if not api_key:
@@ -216,6 +224,10 @@ def ionq_submit_job(
         resolved_backend = _resolve_ionq_backend(backend_name)
         is_hardware = _ionq_is_hardware(resolved_backend)
         n_circuits = len(circuits)
+
+        from core.verifier import _resolve_amplification_tolerance
+        amplification_tolerance, tolerance_source = _resolve_amplification_tolerance(
+            "ionq", resolved_backend, amplification_tolerance)
 
         def _per_circuit(value, param_name):
             if value is None:
@@ -243,7 +255,8 @@ def ionq_submit_job(
             sim_backend.set_options(noise_model=device_short_name)
 
         self_check = {"ran": True, "per_circuit": [], "passed": True,
-                       "noise_model_used": sim_backend.options.noise_model}
+                       "noise_model_used": sim_backend.options.noise_model,
+                       "tolerance_used": amplification_tolerance, "tolerance_source": tolerance_source}
         for i, qc in enumerate(circuits):
             t_qc = transpile(qc, backend=target_backend, optimization_level=optimization_level)
             sim_job = sim_backend.run(t_qc, shots=shots)
@@ -641,7 +654,7 @@ def ionq_preflight(
     shots: int = 2048,
     expected_marked_bitstrings=None,
     expected_amplification=None,
-    amplification_tolerance: float = 0.5,
+    amplification_tolerance: float = None,
 ) -> dict:
     """
     Runs the full recommended sequence before a real IonQ submission, in
@@ -650,6 +663,11 @@ def ionq_preflight(
     block, since you may have a real reason to use a non-top-ranked
     device), per-circuit safety verification, and a real cost/budget
     check. Returns one clear overall verdict.
+
+    amplification_tolerance defaults to None (added 2026-08-28) and is
+    passed straight through to verify() per circuit, which resolves it
+    (explicit value wins; None becomes a real, data-driven recommendation)
+    -- no separate resolution needed here.
 
     This does NOT submit anything — pass the same arguments to
     ionq_submit_job (with confirm_real_hardware=True) once this comes

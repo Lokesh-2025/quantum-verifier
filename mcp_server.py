@@ -42,7 +42,7 @@ def verify_experiment(
     shots: int = 4096,
     expected_marked_bitstrings: list = None,
     expected_amplification: float = None,
-    amplification_tolerance: float = 0.5,
+    amplification_tolerance: float = None,
 ) -> str:
     """
     The safety gate. Checks a circuit's semantics, its routing/topology risk,
@@ -58,7 +58,12 @@ def verify_experiment(
         shots         : shots for the simulation passes (default 4096)
         expected_marked_bitstrings : optional, target bitstrings for a known-answer check
         expected_amplification     : optional, predicted amplification to verify against
-        amplification_tolerance    : relative tolerance (default 0.5)
+        amplification_tolerance    : relative tolerance. Defaults to None (added 2026-08-28) --
+                                      an explicit value is always used exactly as given; None
+                                      resolves to a real, data-driven recommendation from this
+                                      provider/device's own prediction history, falling back to
+                                      the same plain 0.5 default when there isn't enough real
+                                      data yet. Result always shows tolerance_used/tolerance_source.
 
     Returns a GO/BLOCK verdict with structured, human-readable reasons.
     If no expected result is supplied, use falsify_claim instead — it
@@ -399,7 +404,7 @@ def ionq_submit_job(
     optimization_level: int = 1,
     expected_marked_bitstrings: list = None,
     expected_amplification=None,
-    amplification_tolerance: float = 0.5,
+    amplification_tolerance: float = None,
     confirm_real_hardware: bool = False,
 ) -> str:
     """
@@ -456,7 +461,7 @@ def ionq_preflight(
     shots: int = 2048,
     expected_marked_bitstrings: list = None,
     expected_amplification=None,
-    amplification_tolerance: float = 0.5,
+    amplification_tolerance: float = None,
 ) -> str:
     """
     Runs the full recommended sequence before a real IonQ submission in

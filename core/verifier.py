@@ -1215,6 +1215,30 @@ def check_taxonomy() -> dict:
     return CHECK_TAXONOMY
 
 
+def _resolve_amplification_tolerance(provider: str, target_device: str, amplification_tolerance) -> tuple:
+    """
+    Added 2026-08-28. Resolve the tolerance actually used for a check: an
+    explicit caller value always wins outright -- this never overrides one.
+    None triggers a real, data-driven recommendation from
+    core.intelligence.recommend_tolerance, based on this tool's own
+    prediction-vs-reality history for this exact provider/device, falling
+    back to the same plain 0.5 default it always used when there isn't yet
+    enough real data to justify anything more specific.
+
+    Returns (resolved_value, source_label). source_label is surfaced in
+    the caller's result (as tolerance_used/tolerance_source) so this is
+    never a silent substitution -- anyone reading a result can see exactly
+    what tolerance actually gated it and why.
+    """
+    if amplification_tolerance is not None:
+        return amplification_tolerance, "explicit"
+    from core.intelligence import recommend_tolerance
+    rec = recommend_tolerance(provider, target_device)
+    if rec["confidence"].startswith("default"):
+        return rec["recommended_tolerance"], "default (not enough data)"
+    return rec["recommended_tolerance"], f"recommended ({rec['n_real_data_points']} data points)"
+
+
 # ---------------------------------------------------------------- orchestrator
 def verify(
     qasm_string: str,
@@ -1223,7 +1247,7 @@ def verify(
     shots: int = 4096,
     expected_marked_bitstrings: list = None,
     expected_amplification: float = None,
-    amplification_tolerance: float = 0.5,
+    amplification_tolerance: float = None,
 ) -> dict:
     """
     Run the full pipeline and return a GO / BLOCK verdict.
@@ -1233,8 +1257,18 @@ def verify(
     the caller is in discovery mode — see control_experiment.py for the
     control-circuit alternative, which doesn't require knowing the answer
     in advance.
+
+    amplification_tolerance defaults to None (added 2026-08-28) -- an
+    explicit value from the caller is always used exactly as given; None
+    resolves to a real, data-driven recommendation (see
+    _resolve_amplification_tolerance above) instead of a silently
+    hardcoded 0.5. The resolved value and where it came from are always
+    in the result (tolerance_used/tolerance_source), never hidden.
     """
-    result = {"provider": provider, "target_device": target_device}
+    amplification_tolerance, tolerance_source = _resolve_amplification_tolerance(
+        provider, target_device, amplification_tolerance)
+    result = {"provider": provider, "target_device": target_device,
+              "tolerance_used": amplification_tolerance, "tolerance_source": tolerance_source}
 
     try:
         circuit = _parse(qasm_string)
