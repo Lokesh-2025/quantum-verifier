@@ -160,3 +160,57 @@ def test_repeat_hash_under_threshold_is_not_flagged():
 
 def test_not_applicable_with_no_counts():
     assert v.detect_stale_job_result(None, expected_total_shots=1000)["applicable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Integration: wired into verify(), added 2026-08-28 -- informational only,
+# same "earn integration first" pattern ground_truth_significance_test used.
+# Must appear in the output and must NEVER affect the GO/BLOCK verdict.
+# ---------------------------------------------------------------------------
+
+BELL = """
+OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+creg c[2];
+h q[0];
+cx q[0], q[1];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+""".strip()
+
+
+def test_all_three_checks_appear_in_verify_output_without_changing_the_verdict(monkeypatch):
+    def _fake_hw(circuit, provider, target_device, shots):
+        return {"counts": {"00": 2048, "11": 2048}, "total_shots": 4096}
+
+    monkeypatch.setattr(v, "hardware_aware_simulation", _fake_hw)
+
+    result = v.verify(BELL, provider="ionq", target_device="simulator", shots=4096,
+                       expected_marked_bitstrings=["00", "11"], expected_amplification=2.0)
+
+    assert "register_mapping_check" in result
+    assert "stale_result_check" in result
+    assert "reversed_bitstring_check" in result
+    assert result["register_mapping_check"]["applicable"] is True
+    assert result["stale_result_check"]["applicable"] is True
+    # ["00", "11"] are both palindromes -- correctly non-applicable here,
+    # nothing to distinguish (see test_palindromic_bitstring_is_not_applicable)
+    assert result["reversed_bitstring_check"]["applicable"] is False
+    # old check still drives the actual verdict, unchanged
+    assert result["verdict"] == "GO"
+
+
+def test_register_mapping_check_appears_even_without_a_claim(monkeypatch):
+    """Doesn't need expected_marked_bitstrings -- only needs the parsed
+    circuit, so it must run even in discovery mode (no claim supplied)."""
+    def _fake_hw(circuit, provider, target_device, shots):
+        return {"counts": {"00": 2048, "11": 2048}, "total_shots": 4096}
+
+    monkeypatch.setattr(v, "hardware_aware_simulation", _fake_hw)
+
+    result = v.verify(BELL, provider="ionq", target_device="simulator", shots=4096)
+    assert "register_mapping_check" in result
+    assert result["register_mapping_check"]["is_identity_mapping"] is True
+    # discovery mode -- reversed_bitstring_check needs a claim, must not appear
+    assert "reversed_bitstring_check" not in result

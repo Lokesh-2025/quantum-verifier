@@ -1172,7 +1172,7 @@ CHECK_TAXONOMY = {
                       "on whether the CLAIM itself was built with a common, "
                       "entirely non-quantum mistake (Qiskit's bit-ordering "
                       "convention applied backwards). Standalone, informational "
-                      "only -- not yet wired into verify()'s automatic pipeline.",
+                      "only -- wired into verify()'s pipeline as of 2026-08-28, never gates the verdict.",
     },
     "detect_suspicious_register_mapping": {
         "kind": "mundane_explanation",
@@ -1180,7 +1180,7 @@ CHECK_TAXONOMY = {
                       "a non-identity mapping (legal, sometimes deliberate, "
                       "but silently misleading if assumed trivial) gets "
                       "checked rather than assumed. Standalone, informational "
-                      "only -- not yet wired into verify()'s automatic pipeline.",
+                      "only -- wired into verify()'s pipeline as of 2026-08-28, never gates the verdict.",
     },
     "detect_stale_job_result": {
         "kind": "mundane_explanation",
@@ -1189,8 +1189,8 @@ CHECK_TAXONOMY = {
                       "mismatch, implausible repeat count) -- boring "
                       "explanations for a bad-looking result that have "
                       "nothing to do with hardware or the circuit. "
-                      "Standalone, informational only -- not yet wired into "
-                      "verify()'s automatic pipeline.",
+                      "Standalone, informational only -- wired into verify()'s "
+                      "pipeline as of 2026-08-28, never gates the verdict.",
     },
 }
 
@@ -1289,6 +1289,12 @@ def verify(
                 "reason": "Topology check failed — real routing overhead expected.",
                 "details": topo}
 
+    # Mundane-explanations check (added 2026-08-28, wired in per the same
+    # "earn integration first" pattern ground_truth_significance_test used
+    # when it was first added -- informational only, never gates the
+    # verdict). Only needs the parsed circuit, so it can run this early.
+    result["register_mapping_check"] = detect_suspicious_register_mapping(circuit)
+
     if expected_marked_bitstrings and expected_amplification is not None:
         power_check = required_shots_check(
             len(expected_marked_bitstrings), expected_amplification, circuit.num_qubits, shots,
@@ -1305,6 +1311,12 @@ def verify(
     result["hardware_aware_simulation"] = hw
     if "error" in hw:
         return {**result, "verdict": "BLOCK", "reason": hw["error"]}
+
+    # Mundane-explanations check: catches a result whose shot count doesn't
+    # match what was requested -- a real, boring, non-quantum sign a result
+    # might not belong to this request (stale/cached response). Runs
+    # unconditionally (no claim needed), informational only.
+    result["stale_result_check"] = detect_stale_job_result(hw.get("counts"), shots)
 
     gsc = hw.get("gate_synthesis_check")
     if gsc and not gsc["passed"]:
@@ -1328,6 +1340,11 @@ def verify(
             hw.get("counts"), expected_marked_bitstrings, expected_amplification,
             amplification_tolerance,
         )
+        # Mundane-explanations check: is the claim itself possibly built
+        # with Qiskit's bit order applied backwards? Only meaningful once
+        # there's a real claim to compare against. Informational only.
+        result["reversed_bitstring_check"] = detect_reversed_bitstring_convention(
+            expected_marked_bitstrings, hw.get("counts"))
         from core.memory import record_shadow_mode_comparison
         record_shadow_mode_comparison(provider, target_device, qasm_string,
                                        gt, result["ground_truth_significance_test"],

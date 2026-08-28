@@ -82,6 +82,17 @@ def _connect():
         "ci_lower", "ci_upper", "ci_method", "p_value", "tost_verdict",
         "old_check_within_tolerance", "old_check_tolerance_used", "agree",
     ])
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_invocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'real'
+        )
+    """)
+    assert_schema_matches(conn, "tool_invocations", [
+        "id", "timestamp", "tool_name", "source",
+    ])
     conn.commit()
     return conn
 
@@ -441,3 +452,28 @@ def shadow_mode_disagreement_log(limit: int = 50) -> dict:
             "check to block on its own."
         ),
     }
+
+
+def record_tool_invocation(tool_name: str, source: str = "real") -> None:
+    """
+    Added 2026-08-28, implementing the design in the 2026-08-27 overnight
+    report's Task 4 section. Real-usage tracking for the 41->18
+    consolidation decision, so it can eventually be data-driven instead of
+    judgment-based -- deliberately minimal: no arguments, no circuit
+    content, no user data, just which tool was called and when.
+
+    Called from mcp_server.py's _track_invocation decorator, which wraps
+    every @mcp.tool() definition and reuses this module's own
+    _connect()/_DB_PATH -- meaning tests/conftest.py's existing session-wide
+    isolation fixture covers this table automatically, the same guarantee
+    every other write path in this file already has, with no new isolation
+    code needed anywhere.
+    """
+    import datetime
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO tool_invocations (timestamp, tool_name, source) VALUES (?, ?, ?)",
+        (datetime.datetime.now(datetime.timezone.utc).isoformat(), tool_name, source),
+    )
+    conn.commit()
+    conn.close()

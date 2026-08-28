@@ -6,6 +6,7 @@ have zero MCP dependency and can be imported and used directly (in tests,
 scripts, another agent's code) without ever going through this file. This
 module's only job is exposing those functions as MCP tools.
 """
+import functools
 import json
 from mcp.server.fastmcp import FastMCP
 
@@ -30,11 +31,43 @@ import providers.ionq as ionq
 mcp = FastMCP("quantum-verifier")
 
 
+def _track_invocation(fn):
+    """
+    Added 2026-08-28, implementing the design in the 2026-08-27 overnight
+    report's Task 4 section: real-usage tracking for the eventual
+    41->18 consolidation decision, minimal by design (tool name + when,
+    nothing else). Applied alongside @mcp.tool() on every tool definition
+    below, wrapping the function rather than editing any body.
+
+    Logs in a `finally` block -- fires exactly once whether the wrapped
+    tool succeeds or raises, never skipped, never doubled. Tracking itself
+    is never allowed to break the real tool call: a failure recording the
+    invocation is swallowed, not propagated, since this is a secondary,
+    best-effort signal, not part of the tool's actual job.
+
+    Reuses core.memory's existing _connect()/_DB_PATH -- no new connection
+    path, so tests/conftest.py's existing session-wide isolation fixture
+    covers this automatically.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                from core.memory import record_tool_invocation
+                record_tool_invocation(fn.__name__)
+            except Exception:
+                pass
+    return wrapper
+
+
 # --------------------------------------------------------------------------
 # Core: the Verifier and the control-experiment generator
 # --------------------------------------------------------------------------
 
 @mcp.tool()
+@_track_invocation
 def verify_experiment(
     qasm_string: str,
     provider: str,
@@ -76,6 +109,7 @@ def verify_experiment(
 
 
 @mcp.tool()
+@_track_invocation
 def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05,
                                       family_size: int = None) -> str:
     """
@@ -115,6 +149,7 @@ def correct_for_multiple_comparisons(verify_results: list, alpha: float = 0.05,
 
 
 @mcp.tool()
+@_track_invocation
 def check_taxonomy() -> str:
     """
     The triage table: which of the verifier's checks are structural (hard
@@ -128,6 +163,7 @@ def check_taxonomy() -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def shadow_mode_disagreement_log(limit: int = 50) -> str:
     """
     Every verify_experiment call with a known-answer claim quietly logs
@@ -144,6 +180,7 @@ def shadow_mode_disagreement_log(limit: int = 50) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def falsify_claim(
     qasm_string: str,
     provider: str,
@@ -182,6 +219,7 @@ def falsify_claim(
 
 
 @mcp.tool()
+@_track_invocation
 def run_ghz_parity_check(n_qubits: int, provider: str, target_device: str, shots: int = 4096) -> str:
     """
     Checkable-structure experiment: builds an n-qubit GHZ state, runs it
@@ -205,6 +243,7 @@ def run_ghz_parity_check(n_qubits: int, provider: str, target_device: str, shots
 
 
 @mcp.tool()
+@_track_invocation
 def run_graph_coloring_search(
     edges: list,
     n_vertices: int,
@@ -246,24 +285,28 @@ def run_graph_coloring_search(
 # --------------------------------------------------------------------------
 
 @mcp.tool()
+@_track_invocation
 def list_devices() -> str:
     """All accessible IBM backends with live operational status."""
     return json.dumps(ibm.list_devices(), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def get_device_details(device_name: str) -> str:
     """Per-qubit T1/T2, readout error, gate error, queue depth."""
     return json.dumps(ibm.get_device_details(device_name), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def best_qubits(device_name: str, n: int = 5) -> str:
     """Best n individual qubits on a device by live calibration."""
     return json.dumps(ibm.best_qubits(device_name, n), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def best_qubits_for_reproducibility(device_name: str, n: int = 5, min_history: int = 3) -> str:
     """
     Like best_qubits, but favors STABLE qubits over momentarily-good ones —
@@ -276,36 +319,42 @@ def best_qubits_for_reproducibility(device_name: str, n: int = 5, min_history: i
 
 
 @mcp.tool()
+@_track_invocation
 def compare_devices(sort_by: str = "cx_error") -> str:
     """Rank IBM devices by cx_error, queue, qubits, or combined score."""
     return json.dumps(ibm.compare_devices(sort_by), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def queue_status() -> str:
     """Current queue snapshot across all IBM backends."""
     return json.dumps(ibm.queue_status(), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def device_history(device_name: str, days: int = 7) -> str:
     """Calibration snapshots over the last N days."""
     return json.dumps(ibm.device_history(device_name, days), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def device_profile(device_name: str) -> str:
     """Complete hardware profile from the most recent snapshot."""
     return json.dumps(ibm.device_profile(device_name), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def device_on_date(device_name: str, date: str) -> str:
     """Historical stats for a device on a specific past date."""
     return json.dumps(ibm.device_on_date(device_name, date), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2,
                 initial_layout: list = None, confirm_despite_drift_alert: bool = False) -> str:
     """
@@ -327,60 +376,70 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
 
 
 @mcp.tool()
+@_track_invocation
 def job_status(job_id: str) -> str:
     """Status of a submitted IBM job."""
     return json.dumps(ibm.job_status(job_id), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def job_results(job_id: str) -> str:
     """Measurement counts from a completed IBM job."""
     return json.dumps(ibm.job_results(job_id), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def cancel_job(job_id: str) -> str:
     """Cancel a queued or running IBM job."""
     return json.dumps(ibm.cancel_job(job_id), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def list_jobs(limit: int = 10) -> str:
     """Most recently submitted IBM jobs."""
     return json.dumps(ibm.list_jobs(limit), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def estimate_runtime(circuit: str, backend_name: str, shots: int = 1024) -> str:
     """Estimate IBM QPU minutes for a circuit before submitting."""
     return json.dumps(ibm.estimate_runtime(circuit, backend_name, shots), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def route_job(circuit: str, shots: int = 1024, max_minutes: float = 10.0) -> str:
     """Recommend the best IBM device for a circuit based on cost and quality."""
     return json.dumps(ibm.route_job(circuit, shots, max_minutes), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def get_alerts(device_name: str = "", days: int = 7) -> str:
     """Calibration drift alerts for IBM devices."""
     return json.dumps(ibm.get_alerts(device_name, days), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def start_repro_experiment(circuit: str, backend_name: str, n_runs: int = 5, shots: int = 1024) -> str:
     """Submit the same circuit N times to measure reproducibility on real IBM hardware."""
     return json.dumps(ibm.start_repro_experiment(circuit, backend_name, n_runs, shots), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def repro_score(experiment_id: int) -> str:
     """0-1 reproducibility score after repeat runs complete."""
     return json.dumps(ibm.repro_score(experiment_id), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def job_analytics() -> str:
     """Breakdown of jobs submitted through this server, by tool."""
     return json.dumps(ibm.job_analytics(), indent=2)
@@ -391,12 +450,14 @@ def job_analytics() -> str:
 # --------------------------------------------------------------------------
 
 @mcp.tool()
+@_track_invocation
 def ionq_devices() -> str:
     """All IonQ backends and simulators with live status."""
     return json.dumps(ionq.ionq_devices(), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def ionq_submit_job(
     backend_name: str,
     qasm_circuits: list,
@@ -420,30 +481,35 @@ def ionq_submit_job(
 
 
 @mcp.tool()
+@_track_invocation
 def ionq_job_status(job_id: str, backend_name: str = "ionq_simulator") -> str:
     """Status of a submitted IonQ job."""
     return json.dumps(ionq.ionq_job_status(job_id, backend_name), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def ionq_job_results(job_id: str, backend_name: str = "simulator") -> str:
     """Measurement counts from a completed IonQ job."""
     return json.dumps(ionq.ionq_job_results(job_id, backend_name), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def estimate_ionq_gates(qasm_string: str, backend_name: str = "forte-1", optimization_level: int = 1) -> str:
     """Native gate count (GPI/GPI2/ZZ) for a circuit before submitting."""
     return json.dumps(ionq.estimate_ionq_gates(qasm_string, backend_name, optimization_level), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> str:
     """Dollar cost preview using IonQ's real per-job pricing floor."""
     return json.dumps(ionq.estimate_ionq_cost(qasm_circuits, shots), indent=2)
 
 
 @mcp.tool()
+@_track_invocation
 def ibm_account_check() -> str:
     """
     Which IBM Quantum instance(s) this account can access and real usage
@@ -455,6 +521,7 @@ def ibm_account_check() -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def ionq_preflight(
     qasm_circuits: list,
     target_device: str,
@@ -480,6 +547,7 @@ def ionq_preflight(
 
 
 @mcp.tool()
+@_track_invocation
 def ionq_account_check() -> str:
     """
     Which IonQ project(s)/organization the current API key can actually
@@ -492,6 +560,7 @@ def ionq_account_check() -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def ionq_compare_devices() -> str:
     """
     Ranks IonQ's real hardware devices by live calibration data (2-qubit
@@ -502,6 +571,7 @@ def ionq_compare_devices() -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def find_optimal_backend(
     qasm_string: str,
     ibm_device: str = "",
@@ -528,6 +598,7 @@ def find_optimal_backend(
 
 
 @mcp.tool()
+@_track_invocation
 def diff_compilers(qasm_string: str, ibm_device: str) -> str:
     """
     Multi-compiler diff: transpiles the same circuit via Qiskit and TKET
@@ -552,6 +623,7 @@ def diff_compilers(qasm_string: str, ibm_device: str) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def verify_stabilizer_circuit(qasm_string: str) -> str:
     """
     Checkable-structure verification, generalized: if a circuit is built
@@ -580,6 +652,7 @@ def verify_stabilizer_circuit(qasm_string: str) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def verify_stabilizer_hardware_result(qasm_string: str, hw_counts: dict) -> str:
     """
     Verify real hardware measurement counts against a Clifford circuit's
@@ -599,6 +672,7 @@ def verify_stabilizer_hardware_result(qasm_string: str, hw_counts: dict) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def find_robust_circuit(
     candidate_qasm_circuits: list,
     provider: str,
@@ -635,6 +709,7 @@ def find_robust_circuit(
 # --------------------------------------------------------------------------
 
 @mcp.tool()
+@_track_invocation
 def ionq_sync_memory_for_job(job_id: str) -> str:
     """
     Completes Experiment Memory for a real IonQ job once it's actually
@@ -647,6 +722,7 @@ def ionq_sync_memory_for_job(job_id: str) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def memory_summary(provider: str = None) -> str:
     """
     How trustworthy has this tool's predictions actually been, broken
@@ -658,6 +734,7 @@ def memory_summary(provider: str = None) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> str:
     """
     A real, honest hit rate: when this tool's verdict would have said GO
@@ -670,6 +747,7 @@ def verdict_track_record(tolerance: float = 0.5, provider: str = None) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def check_chip_identity(device_name: str, compare_days_back: int = 7) -> str:
     """
     Detects a silent hardware swap or qubit relabeling via real per-qubit
@@ -683,6 +761,7 @@ def check_chip_identity(device_name: str, compare_days_back: int = 7) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def audit_calibration_telemetry(device_name: str) -> str:
     """
     Audits whether a device's calibration DATA looks like real
@@ -696,6 +775,7 @@ def audit_calibration_telemetry(device_name: str) -> str:
 
 
 @mcp.tool()
+@_track_invocation
 def recommend_tolerance(provider: str, target_device: str, default: float = 0.5) -> str:
     """
     Recommends an amplification_tolerance based on this tool's REAL
