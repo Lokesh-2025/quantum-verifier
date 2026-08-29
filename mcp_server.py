@@ -10,6 +10,9 @@ import argparse
 import functools
 import json
 
+from dotenv import load_dotenv
+load_dotenv()  # load root-level .env before any provider reads os.getenv()
+
 # Parse --transport/--port/--host before FastMCP is instantiated so the
 # values can be forwarded directly into FastMCP() as keyword arguments.
 # FastMCP reads port/host at __init__ time from its own kwargs, not from env.
