@@ -6,8 +6,20 @@ have zero MCP dependency and can be imported and used directly (in tests,
 scripts, another agent's code) without ever going through this file. This
 module's only job is exposing those functions as MCP tools.
 """
+import argparse
 import functools
 import json
+
+# Parse --transport/--port/--host before FastMCP is instantiated so the
+# values can be forwarded directly into FastMCP() as keyword arguments.
+# FastMCP reads port/host at __init__ time from its own kwargs, not from env.
+_parser = argparse.ArgumentParser(description="quantum-verifier MCP server", add_help=False)
+_parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], default="stdio")
+_parser.add_argument("--port", type=int, default=None)
+_parser.add_argument("--host", default=None)
+_parser.add_argument("-h", "--help", action="store_true", default=False)
+_args, _ = _parser.parse_known_args()
+
 from mcp.server.fastmcp import FastMCP
 
 from core.verifier import verify as _verify
@@ -28,7 +40,13 @@ from core.stabilizer import verify_stabilizer_hardware_result as _verify_stabili
 import providers.ibm as ibm
 import providers.ionq as ionq
 
-mcp = FastMCP("quantum-verifier")
+_fastmcp_kwargs = {}
+if _args.port is not None:
+    _fastmcp_kwargs["port"] = _args.port
+if _args.host is not None:
+    _fastmcp_kwargs["host"] = _args.host
+
+mcp = FastMCP("quantum-verifier", **_fastmcp_kwargs)
 
 
 def _track_invocation(fn):
@@ -789,4 +807,25 @@ def recommend_tolerance(provider: str, target_device: str, default: float = 0.5)
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Full help parser — now that startup is done, show clean usage if asked.
+    parser = argparse.ArgumentParser(description="quantum-verifier MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default="stdio",
+        help="Transport to use (default: stdio)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port for SSE/streamable-http transport (default: 8000, or set FASTMCP_PORT)",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Host for SSE/streamable-http transport (default: 127.0.0.1, or set FASTMCP_HOST)",
+    )
+    args = parser.parse_args()
+
+    mcp.run(transport=args.transport)
