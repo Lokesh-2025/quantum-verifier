@@ -25,7 +25,9 @@ A ReAct (Reason-Act) agent for the [quantum-verifier](../README.md) MCP server. 
 ## Choosing an LLM Provider
 
 ### Google Gemini
+
 Cloud API, no local setup required.
+
 ```bash
 # Free tier available at https://aistudio.google.com/app/apikey
 GEMINI_API_KEY=your_key
@@ -34,7 +36,9 @@ LLM_PROVIDER=gemini
 ```
 
 ### Ollama (Recommended for Privacy)
+
 Fully local — no API key, no data leaves your machine.
+
 ```bash
 # Install: https://ollama.com
 ollama pull llama3.1:8b
@@ -43,6 +47,7 @@ LLM_PROVIDER=ollama
 ```
 
 ### OpenAI
+
 ```bash
 OPENAI_API_KEY=your_key
 OPENAI_MODEL=gpt-4o
@@ -50,6 +55,7 @@ LLM_PROVIDER=openai
 ```
 
 ### Anthropic Claude
+
 ```bash
 ANTHROPIC_API_KEY=your_key
 ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
@@ -57,7 +63,9 @@ LLM_PROVIDER=anthropic
 ```
 
 ### vLLM
+
 Self-hosted, OpenAI-compatible endpoint.
+
 ```bash
 VLLM_BASE_URL=http://localhost:8000/v1
 VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
@@ -90,8 +98,9 @@ python mcp_server.py --transport sse --port 3031
 The server will listen at `http://127.0.0.1:3031/sse`. This is what `QUANTUM_MCP_SERVER_URI` in `.env` should point to.
 
 > **Port assignments** (no collisions with the sibling project):
+>
 > | Service | Default Port |
-> |---------|-------------|
+> | --------- | ------------- |
 > | quantum-hardware-mcp server | 3020 |
 > | quantum-hardware-mcp agent dispatcher | 3021 |
 > | quantum-verifier MCP server (SSE) | 3031 |
@@ -104,12 +113,14 @@ The quantum-verifier's stdio default is untouched — for Claude Desktop, contin
 ## Running the Agent
 
 **Step 1 — Start the quantum-verifier MCP server (SSE mode):**
+
 ```bash
 # In quantum-verifier/
 python mcp_server.py --transport sse --port 3031
 ```
 
 **Step 2 — Start the dispatcher:**
+
 ```bash
 # In quantum-verifier/agent/
 npm start
@@ -117,11 +128,19 @@ npm start
 ```
 
 **Step 3 — Open the chat:**
+
 ```bash
 node chat.js
 ```
 
+-or-
+
+```bash
+npm run chat.js
+```
+
 Or call the REST API directly:
+
 ```bash
 curl -X POST http://localhost:3041/chat \
   -H 'Content-Type: application/json' \
@@ -132,7 +151,7 @@ curl -X POST http://localhost:3041/chat \
 
 ## Using the REPL Chat Interface
 
-```
+```text
 ╔══════════════════════════════════════════════════════════╗
 ║       Quantum Verifier Agent Chat Interface              ║
 ╚══════════════════════════════════════════════════════════╝
@@ -145,7 +164,7 @@ Connected to: http://localhost:3041
 ### Commands
 
 | Command | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `<question>` | Ask anything about circuit verification, hardware, or jobs |
 | `@/path/to/file` | Attach a file's contents inline (e.g. `@./my_circuit.qasm`) |
 | `/poll IBM <job_id> [secs]` | Poll an IBM job until it completes (default: every 10s) |
@@ -158,7 +177,7 @@ Connected to: http://localhost:3041
 
 ### Example Queries
 
-```
+```text
 Verify this circuit on IonQ forte-1:
 OPENQASM 2.0; include "qelib1.inc"; qreg q[2]; creg c[2]; h q[0]; cx q[0],q[1]; measure q -> c;
 
@@ -186,6 +205,7 @@ What is the recommendation for amplification_tolerance on IonQ forte-1?
 ### `POST /chat`
 
 **Request:**
+
 ```json
 {
   "question": "string (required)",
@@ -198,6 +218,7 @@ What is the recommendation for amplification_tolerance on IonQ forte-1?
 ```
 
 **Response:**
+
 ```json
 {
   "status": "complete",
@@ -210,11 +231,13 @@ What is the recommendation for amplification_tolerance on IonQ forte-1?
 ```
 
 **Error response:**
+
 ```json
 { "status": "error", "answer": "string" }
 ```
 
 ### `GET /health`
+
 ```json
 { "status": "ok", "subagents": ["Core", "IBM", "IonQ"] }
 ```
@@ -223,7 +246,7 @@ What is the recommendation for amplification_tolerance on IonQ forte-1?
 
 ## Architecture
 
-```
+```text
 User terminal
      │ readline REPL
      ▼
@@ -250,7 +273,7 @@ chat.js ──── HTTP POST /chat ──── agent-server.js (dispatcher, p
 ### Subagent Domains
 
 | Subagent | Tools | Notes |
-|----------|-------|-------|
+| ---------- | ------- | ------- |
 | **Core** | `verify_experiment`, `falsify_claim`, `find_robust_circuit`, `correct_for_multiple_comparisons`, `check_taxonomy`, `shadow_mode_disagreement_log`, `run_ghz_parity_check`, `run_graph_coloring_search`, `verify_stabilizer_circuit`, `verify_stabilizer_hardware_result`, `find_optimal_backend`, `diff_compilers`, `memory_summary`, `verdict_track_record`, `recommend_tolerance`, `ionq_sync_memory_for_job` | The verifier pipeline; routes questions spanning multiple domains |
 | **IBM** | `list_devices`, `get_device_details`, `best_qubits`, `best_qubits_for_reproducibility`, `compare_devices`, `queue_status`, `device_history`, `device_profile`, `device_on_date`, `submit_job`, `job_status`, `job_results`, `cancel_job`, `list_jobs`, `estimate_runtime`, `route_job`, `get_alerts`, `start_repro_experiment`, `repro_score`, `job_analytics`, `ibm_account_check`, `check_chip_identity`, `audit_calibration_telemetry` | IBM device intelligence and job lifecycle |
 | **IonQ** | `ionq_devices`, `ionq_compare_devices`, `ionq_account_check`, `ionq_preflight`, `ionq_submit_job`, `ionq_job_status`, `ionq_job_results`, `estimate_ionq_gates`, `estimate_ionq_cost`, `ionq_sync_memory_for_job` | IonQ trapped-ion hardware |
@@ -278,6 +301,7 @@ IONQ_API_KEY=your_ionq_key
 ### Provider-Specific Configuration
 
 #### Gemini
+
 ```env
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=your_key_here
@@ -285,11 +309,13 @@ GEMINI_MODEL=gemini-2.5-pro
 ```
 
 #### Ollama (Local)
+
 ```bash
 # Install and pull a model first
 ollama serve
 ollama pull llama3.1:8b
 ```
+
 ```env
 LLM_PROVIDER=ollama
 OLLAMA_MODEL=llama3.1:8b
@@ -297,7 +323,8 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_TEMPERATURE=0.7
 ```
 
-#### OpenAI
+#### OpenAI configuration
+
 ```env
 LLM_PROVIDER=openai
 OPENAI_API_KEY=your_key_here
@@ -305,7 +332,8 @@ OPENAI_MODEL=gpt-4o
 OPENAI_TEMPERATURE=0.7
 ```
 
-#### Anthropic Claude
+#### Anthropic Claude configuration
+
 ```env
 LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=your_key_here
@@ -314,13 +342,15 @@ ANTHROPIC_TEMPERATURE=0.7
 ANTHROPIC_MAX_TOKENS=4096
 ```
 
-#### vLLM
+#### vLLM configuration
+
 ```bash
 # Start vLLM server first
 python -m vllm.entrypoints.openai.api_server \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --port 8000
 ```
+
 ```env
 LLM_PROVIDER=vllm
 VLLM_BASE_URL=http://localhost:8000/v1
@@ -357,21 +387,21 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 
 ### LLM Provider
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LLM_PROVIDER` | Yes | `gemini` | `gemini`, `ollama`, `openai`, `anthropic`, or `vllm` |
+| Variable        | Required | Default   | Description                                          |
+|-----------------|----------|-----------|------------------------------------------------------|
+| `LLM_PROVIDER`  | Yes      | `gemini`  | `gemini`, `ollama`, `openai`, `anthropic`, or `vllm` |
 
 ### Gemini Variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| -------- | -------- | ----------- |
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key |
 | `GEMINI_MODEL` | Yes | Model name (e.g. `gemini-2.5-pro`) |
 
 ### Ollama Variables
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+| ---------- | ---------- | --------- | ------------- |
 | `OLLAMA_MODEL` | Yes | — | Model name (e.g. `llama3.1:8b`) |
 | `OLLAMA_BASE_URL` | No | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_TEMPERATURE` | No | `0.7` | Generation temperature |
@@ -380,7 +410,7 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 ### OpenAI Variables
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+| ---------- | ---------- | --------- | ------------- |
 | `OPENAI_API_KEY` | Yes | — | OpenAI API key |
 | `OPENAI_MODEL` | Yes | — | Model name (e.g. `gpt-4o`) |
 | `OPENAI_BASE_URL` | No | OpenAI default | For compatible APIs |
@@ -389,7 +419,7 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 ### Anthropic Variables
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+| ---------- | ---------- | --------- | ------------- |
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
 | `ANTHROPIC_MODEL` | Yes | — | Model name (e.g. `claude-3-5-sonnet-20241022`) |
 | `ANTHROPIC_TEMPERATURE` | No | `0.7` | Generation temperature |
@@ -398,7 +428,7 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 ### vLLM Variables
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+| ---------- | ---------- | --------- | ------------- |
 | `VLLM_BASE_URL` | Yes | — | vLLM server URL (e.g. `http://localhost:8000/v1`) |
 | `VLLM_MODEL` | Yes | — | Model name as loaded in vLLM |
 | `VLLM_API_KEY` | No | `EMPTY` | API key (usually not needed locally) |
@@ -407,15 +437,15 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 
 ### Verifier MCP Server
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `QUANTUM_MCP_SERVER_URI` | Yes | `http://127.0.0.1:3031/sse` | Verifier MCP server SSE endpoint |
-| `MCP_API_KEY` | No | — | MCP server API key (if enabled) |
+| Variable                 | Required | Default                      | Description                       |
+|--------------------------|----------|------------------------------|-----------------------------------|
+| `QUANTUM_MCP_SERVER_URI` | Yes      | `http://127.0.0.1:3031/sse`  | Verifier MCP server SSE endpoint  |
+| `MCP_API_KEY`            | No       | —                            | MCP server API key (if enabled)   |
 
 ### Quantum Credentials
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| ---------- | ---------- | ------------- |
 | `IBM_QUANTUM_TOKEN` | For IBM tools | IBM Quantum account token |
 | `IBM_CHANNEL` | For IBM tools | e.g. `ibm_quantum_platform` |
 | `IONQ_API_KEY` | For IonQ tools | IonQ Cloud API key |
@@ -423,7 +453,7 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 ### Agent Server
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | `PORT` | `3041` | Dispatcher HTTP server port |
 | `QUANTUM_AGENT_URL` | `http://localhost:3041` | Used by `chat.js` to find the dispatcher |
 | `MAX_ITERATIONS` | `10` | Maximum ReAct loop steps per request |
@@ -439,7 +469,7 @@ Leave `QISKIT_CODE_MODEL` unset to disable this feature. Use `/nolocal` in the c
 
 ### MCP Server Connection Refused
 
-```
+```text
 MCP connection failed: connect ECONNREFUSED 127.0.0.1:3031
 ```
 
@@ -453,7 +483,7 @@ python mcp_server.py --transport sse --port 3031
 
 ### Provider Package Not Found
 
-```
+```text
 Provider "gemini" is not available. Please install the required dependency:
 npm install @google/generative-ai
 ```
@@ -469,7 +499,7 @@ npm install @anthropic-ai/sdk       # Anthropic
 
 ### No Tools Available
 
-```
+```text
 No tools available for this provider.
 ```
 
@@ -477,7 +507,7 @@ The MCP server started successfully but returned no tools — usually because th
 
 ### Ollama Connection Refused
 
-```
+```text
 Cannot connect to Ollama at http://localhost:11434.
 ```
 
@@ -508,6 +538,7 @@ python -c "from qiskit_ibm_runtime import QiskitRuntimeService; QiskitRuntimeSer
 The dispatcher and subagents are designed for sequential interactive use. Each `/chat` request spawns one subagent process that lives for the duration of that request. Parallel requests are supported up to the limits of your LLM provider's rate limits.
 
 Key timeouts:
+
 - `SUBAGENT_TIMEOUT_MS` (default 120s) — hard kill if a subagent doesn't return an answer
 - `MCP_TOOL_TIMEOUT_MS` (default 60s) — individual tool call timeout inside the ReAct loop
 - `LLM_TIMEOUT_MS` (default 60s) — each LLM API call timeout
