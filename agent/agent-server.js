@@ -169,6 +169,12 @@ app.post('/chat', async (req, res) => {
 
     // Input validation
     const { question, history, noLocal } = req.body;
+
+    // Fast ping — respond immediately without invoking the LLM
+    if (question && question.trim().toLowerCase() === 'ping') {
+        return res.json({ status: 'complete', answer: 'pong' });
+    }
+
     if (!question || typeof question !== 'string') {
         return res.status(400).json({ status: 'error', answer: 'No question provided.' });
     }
@@ -204,8 +210,16 @@ app.post('/chat', async (req, res) => {
     }
 });
 
-// Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', subagents: Object.keys(SUBAGENTS) }));
+// Health check — returns tool list so dashboard /health can surface it
+app.get('/health', (req, res) => {
+    const tools = Object.keys(SUBAGENTS);
+    res.json({
+        status: 'ok',
+        subagents: tools,
+        tools,
+        toolsLoaded: tools.length,
+    });
+});
 
 // --- Server Startup ---
 app.listen(port, async () => {
