@@ -195,6 +195,64 @@ def collect() -> None:
     print(f"Saved {len(ibm_device_rows)} IBM + {len(ionq_device_rows)} IonQ device rows, "
           f"{len(qubit_rows)} qubit rows, {len(pair_rows)} pair rows.")
 
+    _write_turso(ibm_device_rows + ionq_device_rows, qubit_rows, pair_rows)
+
+
+def _write_turso(device_rows: list, qubit_rows: list, pair_rows: list) -> None:
+    """
+    Added 2026-08-30: this is what makes the data ACTUALLY live for anyone
+    running the tool, not just collected. The CSV above is a durable,
+    git-versioned audit trail; this is what get_alerts() and anything else
+    calling _run_query() (providers/ibm.py) actually reads at query time,
+    from anywhere, with no sync step. Skips silently if Turso isn't
+    configured (e.g. running this script locally without the env vars set).
+
+    Uses core/turso.py's plain requests-based client, not libsql_client --
+    see that module's docstring for why (a confirmed hang-on-exit bug in
+    libsql_client's sync wrapper).
+    """
+    from core.turso import is_configured, execute_batch
+
+    if not is_configured():
+        print("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN not set — skipping live DB write.")
+        return
+
+    BATCH = 500
+
+    def _chunked_batch(statements):
+        for i in range(0, len(statements), BATCH):
+            execute_batch(statements[i:i + BATCH])
+
+    try:
+        _chunked_batch([
+            ("INSERT INTO device_snapshots (ts, provider, name, num_qubits, operational, "
+             "pending_jobs, avg_cx_error, avg_readout_error, median_t1_us, median_t2_us) "
+             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (r["ts"], r["provider"], r["name"], r["num_qubits"], r["operational"],
+              r["pending_jobs"], r["avg_cx_error"], r["avg_readout_error"],
+              r["avg_t1_us"], r["avg_t2_us"]))
+            for r in device_rows
+        ])
+        _chunked_batch([
+            ("INSERT OR IGNORE INTO qubit_snapshots (device_name, qubit_index, property_name, "
+             "value, unit, vendor_measured_at, polled_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (r["device_name"], r["qubit_index"], r["property_name"], r["value"],
+              r["unit"], r["vendor_measured_at"], r["polled_at"]))
+            for r in qubit_rows
+        ])
+        _chunked_batch([
+            ("INSERT OR IGNORE INTO pair_snapshots (device_name, qubit1, qubit2, gate_name, "
+             "property_name, value, unit, vendor_measured_at, polled_at) "
+             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (r["device_name"], r["qubit1"], r["qubit2"], r["gate_name"], r["property_name"],
+              r["value"], r["unit"], r["vendor_measured_at"], r["polled_at"]))
+            for r in pair_rows
+        ])
+        print(f"Turso: wrote {len(device_rows)} device, {len(qubit_rows)} qubit, "
+              f"{len(pair_rows)} pair rows — live for anyone running the tool now.")
+    except Exception as e:
+        print(f"Turso write failed (CSV already saved, so history isn't lost): {e}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     collect()

@@ -36,3 +36,26 @@ def _isolate_experiment_memory_db(tmp_path_factory):
     memory._DB_PATH = db_path
     yield
     memory._DB_PATH = original
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _block_real_turso_during_tests():
+    """
+    Added 2026-08-30 alongside providers/ibm.py's _run_query() Turso
+    integration. mcp_server.py calls load_dotenv() at import time, and at
+    least one test (test_tool_invocation_tracking.py) imports mcp_server —
+    that would load the REAL TURSO_DATABASE_URL/TURSO_AUTH_TOKEN from .env
+    into this process's environment, silently letting test_drift_gate.py
+    and anything else that monkeypatches DB_PATH expecting an isolated
+    local db instead hit the real, live, shared Turso database.
+
+    Patches _get_turso_client itself (not just the env vars) — robust
+    regardless of WHEN load_dotenv() fires relative to this fixture, since
+    popping env vars once at session start wouldn't survive a later
+    load_dotenv() call re-populating them.
+    """
+    import providers.ibm as ibm
+    original = ibm._get_turso_client
+    ibm._get_turso_client = lambda: None
+    yield
+    ibm._get_turso_client = original

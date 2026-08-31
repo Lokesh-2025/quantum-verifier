@@ -19,6 +19,7 @@ copy snapshot.py (the 2-hour calibration pipeline) in this phase:
      silent gap.
 """
 import os
+import sys
 import json
 import sqlite3
 import math
@@ -35,6 +36,42 @@ from qiskit_ibm_runtime import QiskitRuntimeService
 from core.schema_guard import assert_schema_matches
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "ibm_history.db")
+
+# Shared Turso database -- added 2026-08-30 to close a real gap: reads
+# against DB_PATH only ever reflect whoever last synced their own local
+# copy, which depends on their laptop being on. This is queried live, at
+# call time, from anywhere, no sync step needed. Falls back to DB_PATH
+# automatically whenever Turso isn't configured or unreachable (e.g. in
+# tests, which never set these env vars, and conftest.py additionally
+# forces this off for the whole session as a second guarantee) --
+# existing local-db-based tests are unaffected by this change.
+#
+# Uses core/turso.py's plain requests.post() client, not the libsql_client
+# package -- that package's sync wrapper leaves a background thread that
+# doesn't reliably terminate on process exit (confirmed directly: hangs
+# 90s+ even with .close() registered via atexit). Not a risk worth taking
+# in a long-running MCP server process.
+def _get_turso_client():
+    """Kept as a function (not a plain bool) so tests can monkeypatch it
+    to force the local-db fallback path, same shape as before this
+    module switched off libsql_client."""
+    from core.turso import is_configured
+    return is_configured()
+
+
+def _run_query(sql: str, params: tuple = ()) -> list:
+    """SELECT helper: tries the shared Turso database first (live, no sync
+    needed); falls back to the local db (DB_PATH) if Turso isn't
+    configured/reachable. Same SQL runs against both -- libsql is
+    SQLite-compatible."""
+    if _get_turso_client():
+        try:
+            from core.turso import execute as turso_execute
+            return turso_execute(sql, params)
+        except Exception as e:
+            print(f"Turso query failed, falling back to local db: {e}", file=sys.stderr)
+    with sqlite3.connect(DB_PATH) as con:
+        return con.execute(sql, params).fetchall()
 
 
 def _init_db() -> None:
@@ -211,46 +248,47 @@ def _save_snapshots(rows: list) -> None:
 def _recent_drift_alert(device_name: str, hours: int = 24) -> dict | None:
     """
     Real, fresh calibration problem for this exact device, or None. Ported
-    2026-08-24 from quantum-hardware-mcp's submit_job gate (same fix,
-    adapted to this project's own smaller local db rather than sharing
-    files across the two repos, which should stay independent). Checks
-    T1/T2 drops AND cx/readout-error spikes — get_alerts() here previously
-    only checked T1/T2.
+    2026-08-24 from quantum-hardware-mcp's submit_job gate. Checks T1/T2
+    drops AND cx/readout-error spikes — get_alerts() here previously only
+    checked T1/T2.
+
+    Reads via _run_query() (added 2026-08-30) -- live from the shared
+    Turso database when configured, falling back to the local db
+    otherwise. Same SQL either way; libsql is SQLite-compatible.
     """
-    with sqlite3.connect(DB_PATH) as con:
-        row = con.execute(
-            """
-            WITH ranked AS (
-                SELECT ts, median_t1_us, median_t2_us, avg_cx_error, avg_readout_error,
-                    LAG(median_t1_us) OVER (ORDER BY ts) AS prev_t1,
-                    LAG(median_t2_us) OVER (ORDER BY ts) AS prev_t2,
-                    LAG(avg_cx_error) OVER (ORDER BY ts) AS prev_cx,
-                    LAG(avg_readout_error) OVER (ORDER BY ts) AS prev_ro
-                FROM device_snapshots
-                WHERE name = ? AND ts >= datetime('now', ? || ' hours')
-            )
-            SELECT ts, median_t1_us, prev_t1, median_t2_us, prev_t2,
-                   avg_cx_error, prev_cx, avg_readout_error, prev_ro
-            FROM ranked
-            WHERE (prev_t1 IS NOT NULL AND prev_t1 > 0 AND (prev_t1 - median_t1_us) / prev_t1 > 0.20)
-               OR (prev_t2 IS NOT NULL AND prev_t2 > 0 AND (prev_t2 - median_t2_us) / prev_t2 > 0.20)
-               OR (prev_cx IS NOT NULL AND prev_cx > 0 AND (avg_cx_error - prev_cx) / prev_cx > 0.20)
-               OR (prev_ro IS NOT NULL AND prev_ro > 0 AND (avg_readout_error - prev_ro) / prev_ro > 0.20)
-            ORDER BY ts DESC LIMIT 1
-            """,
-            (device_name, f"-{hours}"),
-        ).fetchone()
-        if not row:
-            return None
-        ts, t1, prev_t1, t2, prev_t2, cx, prev_cx, ro, prev_ro = row
-        if prev_t1 and prev_t1 > 0 and (prev_t1 - t1) / prev_t1 > 0.20:
-            return {"ts": ts, "type": "t1_drop", "prev_value": prev_t1, "curr_value": t1}
-        if prev_t2 and prev_t2 > 0 and (prev_t2 - t2) / prev_t2 > 0.20:
-            return {"ts": ts, "type": "t2_drop", "prev_value": prev_t2, "curr_value": t2}
-        if prev_cx and prev_cx > 0 and (cx - prev_cx) / prev_cx > 0.20:
-            return {"ts": ts, "type": "cx_error_spike", "prev_value": prev_cx, "curr_value": cx}
-        if prev_ro and prev_ro > 0 and (ro - prev_ro) / prev_ro > 0.20:
-            return {"ts": ts, "type": "readout_error_spike", "prev_value": prev_ro, "curr_value": ro}
+    rows = _run_query(
+        """
+        WITH ranked AS (
+            SELECT ts, median_t1_us, median_t2_us, avg_cx_error, avg_readout_error,
+                LAG(median_t1_us) OVER (ORDER BY ts) AS prev_t1,
+                LAG(median_t2_us) OVER (ORDER BY ts) AS prev_t2,
+                LAG(avg_cx_error) OVER (ORDER BY ts) AS prev_cx,
+                LAG(avg_readout_error) OVER (ORDER BY ts) AS prev_ro
+            FROM device_snapshots
+            WHERE name = ? AND ts >= datetime('now', ? || ' hours')
+        )
+        SELECT ts, median_t1_us, prev_t1, median_t2_us, prev_t2,
+               avg_cx_error, prev_cx, avg_readout_error, prev_ro
+        FROM ranked
+        WHERE (prev_t1 IS NOT NULL AND prev_t1 > 0 AND (prev_t1 - median_t1_us) / prev_t1 > 0.20)
+           OR (prev_t2 IS NOT NULL AND prev_t2 > 0 AND (prev_t2 - median_t2_us) / prev_t2 > 0.20)
+           OR (prev_cx IS NOT NULL AND prev_cx > 0 AND (avg_cx_error - prev_cx) / prev_cx > 0.20)
+           OR (prev_ro IS NOT NULL AND prev_ro > 0 AND (avg_readout_error - prev_ro) / prev_ro > 0.20)
+        ORDER BY ts DESC LIMIT 1
+        """,
+        (device_name, f"-{hours}"),
+    )
+    if not rows:
+        return None
+    ts, t1, prev_t1, t2, prev_t2, cx, prev_cx, ro, prev_ro = rows[0]
+    if prev_t1 and prev_t1 > 0 and (prev_t1 - t1) / prev_t1 > 0.20:
+        return {"ts": ts, "type": "t1_drop", "prev_value": prev_t1, "curr_value": t1}
+    if prev_t2 and prev_t2 > 0 and (prev_t2 - t2) / prev_t2 > 0.20:
+        return {"ts": ts, "type": "t2_drop", "prev_value": prev_t2, "curr_value": t2}
+    if prev_cx and prev_cx > 0 and (cx - prev_cx) / prev_cx > 0.20:
+        return {"ts": ts, "type": "cx_error_spike", "prev_value": prev_cx, "curr_value": cx}
+    if prev_ro and prev_ro > 0 and (ro - prev_ro) / prev_ro > 0.20:
+        return {"ts": ts, "type": "readout_error_spike", "prev_value": prev_ro, "curr_value": ro}
     return None
 
 
@@ -939,41 +977,44 @@ def route_job(circuit: str, shots: int = 1024, max_minutes: float = 10.0) -> dic
 
 def get_alerts(device_name: str = "", days: int = 7) -> dict:
     """
-    Calibration drift alerts from this project's own local history.
+    Calibration drift alerts, from the shared Turso database when
+    configured (live, 2022-onward real history), falling back to this
+    project's own local history otherwise.
 
     Previously only checked T1/T2 drops — cx-error and readout-error
     spikes were silently not covered at all. Fixed 2026-08-24 alongside
     the _save_snapshots key-name-mismatch bug that meant every alert here
     was computed against all-null data until now (see _save_snapshots'
-    docstring for the full story).
+    docstring for the full story). Reworked 2026-08-30 to read via
+    _run_query() instead of only the local db -- the old
+    os.path.exists(DB_PATH) early-return would have incorrectly blocked
+    this entirely on a fresh checkout with no local db yet, even though
+    the real, shared Turso history is reachable regardless.
     """
-    if not os.path.exists(DB_PATH):
-        return {"error": "No local database found yet — call list_devices first."}
     try:
-        with sqlite3.connect(DB_PATH) as con:
-            params = [f"-{max(1, int(days))}"]
-            name_filter = ""
-            if device_name:
-                name_filter = "AND name = ?"
-                params.append(device_name)
-            rows = con.execute(f"""
-                WITH ranked AS (
-                    SELECT name, ts, median_t1_us, median_t2_us, avg_cx_error, avg_readout_error,
-                        LAG(median_t1_us) OVER (PARTITION BY name ORDER BY ts) AS prev_t1,
-                        LAG(median_t2_us) OVER (PARTITION BY name ORDER BY ts) AS prev_t2,
-                        LAG(avg_cx_error) OVER (PARTITION BY name ORDER BY ts) AS prev_cx,
-                        LAG(avg_readout_error) OVER (PARTITION BY name ORDER BY ts) AS prev_ro
-                    FROM device_snapshots WHERE ts >= datetime('now', ? || ' days') {name_filter}
-                )
-                SELECT name, ts, median_t1_us, prev_t1, median_t2_us, prev_t2,
-                       avg_cx_error, prev_cx, avg_readout_error, prev_ro
-                FROM ranked
-                WHERE (prev_t1 IS NOT NULL AND prev_t1 > 0 AND (prev_t1 - median_t1_us) / prev_t1 > 0.20)
-                   OR (prev_t2 IS NOT NULL AND prev_t2 > 0 AND (prev_t2 - median_t2_us) / prev_t2 > 0.20)
-                   OR (prev_cx IS NOT NULL AND prev_cx > 0 AND (avg_cx_error - prev_cx) / prev_cx > 0.20)
-                   OR (prev_ro IS NOT NULL AND prev_ro > 0 AND (avg_readout_error - prev_ro) / prev_ro > 0.20)
-                ORDER BY ts DESC LIMIT 100
-            """, params).fetchall()
+        params = [f"-{max(1, int(days))}"]
+        name_filter = ""
+        if device_name:
+            name_filter = "AND name = ?"
+            params.append(device_name)
+        rows = _run_query(f"""
+            WITH ranked AS (
+                SELECT name, ts, median_t1_us, median_t2_us, avg_cx_error, avg_readout_error,
+                    LAG(median_t1_us) OVER (PARTITION BY name ORDER BY ts) AS prev_t1,
+                    LAG(median_t2_us) OVER (PARTITION BY name ORDER BY ts) AS prev_t2,
+                    LAG(avg_cx_error) OVER (PARTITION BY name ORDER BY ts) AS prev_cx,
+                    LAG(avg_readout_error) OVER (PARTITION BY name ORDER BY ts) AS prev_ro
+                FROM device_snapshots WHERE ts >= datetime('now', ? || ' days') {name_filter}
+            )
+            SELECT name, ts, median_t1_us, prev_t1, median_t2_us, prev_t2,
+                   avg_cx_error, prev_cx, avg_readout_error, prev_ro
+            FROM ranked
+            WHERE (prev_t1 IS NOT NULL AND prev_t1 > 0 AND (prev_t1 - median_t1_us) / prev_t1 > 0.20)
+               OR (prev_t2 IS NOT NULL AND prev_t2 > 0 AND (prev_t2 - median_t2_us) / prev_t2 > 0.20)
+               OR (prev_cx IS NOT NULL AND prev_cx > 0 AND (avg_cx_error - prev_cx) / prev_cx > 0.20)
+               OR (prev_ro IS NOT NULL AND prev_ro > 0 AND (avg_readout_error - prev_ro) / prev_ro > 0.20)
+            ORDER BY ts DESC LIMIT 100
+        """, tuple(params))
         alerts = []
         for name, ts, t1, prev_t1, t2, prev_t2, cx, prev_cx, ro, prev_ro in rows:
             if prev_t1 and prev_t1 > 0 and (prev_t1 - t1) / prev_t1 > 0.20:
