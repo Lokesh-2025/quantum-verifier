@@ -1,0 +1,46 @@
+name: Quantum Snapshot
+
+on:
+  schedule:
+    # Every 2 hours — matches quantum-hardware-mcp's cloud collector, so
+    # this repo's own history stops depending on the laptop being on.
+    - cron: '0 */2 * * *'
+  # Allow a manual run from the GitHub Actions tab to test without waiting
+  workflow_dispatch:
+
+# Needs write access to commit data/*.csv back to the repo
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install qiskit-ibm-runtime python-dotenv requests
+
+      - name: Fetch device stats
+        env:
+          IBM_QUANTUM_TOKEN: ${{ secrets.IBM_QUANTUM_TOKEN }}
+          IONQ_API_KEY: ${{ secrets.IONQ_API_KEY }}
+        run: python cloud_snapshot.py
+
+      - name: Commit snapshot to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/device_snapshots.csv data/qubit_snapshots.csv data/pair_snapshots.csv
+          # Only commit if something actually changed (skips if API returned nothing)
+          git diff --staged --quiet || \
+            git commit -m "data: cloud snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git pull --rebase origin master
+          git push
