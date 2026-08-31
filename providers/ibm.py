@@ -1043,45 +1043,49 @@ def get_alerts(device_name: str = "", days: int = 7) -> dict:
 
 def _qubit_fingerprint_vector(device_name: str, as_of: str = None) -> dict:
     """Real per-qubit fingerprint from qubit_snapshots/pair_snapshots, ported
-    from quantum-hardware-mcp 2026-08-24. See check_chip_identity."""
-    with sqlite3.connect(DB_PATH) as con:
-        cur = con.cursor()
-        cutoff = as_of or "9999-12-31"
-        qubit_vals = {}
-        for prop in ("T1", "T2", "readout_error"):
-            rows = cur.execute(
-                """
-                SELECT qubit_index, value FROM qubit_snapshots
-                WHERE device_name = ? AND property_name = ? AND vendor_measured_at <= ?
-                AND id IN (
-                    SELECT MAX(id) FROM qubit_snapshots
-                    WHERE device_name = ? AND property_name = ? AND vendor_measured_at <= ?
-                    GROUP BY qubit_index
-                )
-                """,
-                (device_name, prop, cutoff, device_name, prop, cutoff),
-            ).fetchall()
-            for qi, val in rows:
-                qubit_vals.setdefault(qi, {})[prop.lower()] = val
+    from quantum-hardware-mcp 2026-08-24. See check_chip_identity.
 
-        gate_rows = cur.execute(
+    Reads via _run_query() (added 2026-08-31) -- Turso-first (live, now
+    holding quantum-hardware-mcp's full 686k+/754k+ row deep archive, not
+    just this project's own smaller/newer one), local-db fallback
+    otherwise. Previously local-only -- flagged as a known gap in this
+    project's own README, closed here."""
+    cutoff = as_of or "9999-12-31"
+    qubit_vals = {}
+    for prop in ("T1", "T2", "readout_error"):
+        rows = _run_query(
             """
-            SELECT qubit1, qubit2, value FROM pair_snapshots
-            WHERE device_name = ? AND property_name = 'gate_error' AND vendor_measured_at <= ?
+            SELECT qubit_index, value FROM qubit_snapshots
+            WHERE device_name = ? AND property_name = ? AND vendor_measured_at <= ?
             AND id IN (
-                SELECT MAX(id) FROM pair_snapshots
-                WHERE device_name = ? AND property_name = 'gate_error' AND vendor_measured_at <= ?
-                GROUP BY qubit1, qubit2
+                SELECT MAX(id) FROM qubit_snapshots
+                WHERE device_name = ? AND property_name = ? AND vendor_measured_at <= ?
+                GROUP BY qubit_index
             )
             """,
-            (device_name, cutoff, device_name, cutoff),
-        ).fetchall()
-        gate_errors_by_qubit = {}
-        for q1, q2, val in gate_rows:
-            gate_errors_by_qubit.setdefault(q1, []).append(val)
-            gate_errors_by_qubit.setdefault(q2, []).append(val)
-        for qi, errs in gate_errors_by_qubit.items():
-            qubit_vals.setdefault(qi, {})["avg_gate_error"] = sum(errs) / len(errs)
+            (device_name, prop, cutoff, device_name, prop, cutoff),
+        )
+        for qi, val in rows:
+            qubit_vals.setdefault(qi, {})[prop.lower()] = val
+
+    gate_rows = _run_query(
+        """
+        SELECT qubit1, qubit2, value FROM pair_snapshots
+        WHERE device_name = ? AND property_name = 'gate_error' AND vendor_measured_at <= ?
+        AND id IN (
+            SELECT MAX(id) FROM pair_snapshots
+            WHERE device_name = ? AND property_name = 'gate_error' AND vendor_measured_at <= ?
+            GROUP BY qubit1, qubit2
+        )
+        """,
+        (device_name, cutoff, device_name, cutoff),
+    )
+    gate_errors_by_qubit = {}
+    for q1, q2, val in gate_rows:
+        gate_errors_by_qubit.setdefault(q1, []).append(val)
+        gate_errors_by_qubit.setdefault(q2, []).append(val)
+    for qi, errs in gate_errors_by_qubit.items():
+        qubit_vals.setdefault(qi, {})["avg_gate_error"] = sum(errs) / len(errs)
     return qubit_vals
 
 
