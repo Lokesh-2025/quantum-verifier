@@ -4,6 +4,8 @@ A safety gate between an AI-generated quantum circuit and real quantum hardware.
 
 Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quantum-hardware-mcp) — an open-source MCP server giving AI assistants live access to real quantum backends across IBM, IonQ, and AWS Braket. `quantum-verifier` carries over that server's general-purpose device and job tools, drops everything specific to our own research, and adds one thing nothing else in this space does: a mandatory correctness gate in front of real hardware spend.
 
+**Related project:** [qem-auditor](https://github.com/Venkatallu11/qem-auditor) by Venkat Allu — an independent auditor for quantum error-mitigation claims, built on this project's `falsify_claim` control-experiment idea (its own README credits it directly), extended into a stricter, error-mitigation-specific verdict ladder (`INVALID` → `REFUTED` → `NOT ESTABLISHED` → `PROMISING` → `CERTIFIED UNDER SCOPE`).
+
 | | |
 |---|---|
 | **Tools** | 48 |
