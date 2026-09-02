@@ -7,7 +7,7 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 **Related project:** [qem-auditor](https://github.com/Venkatallu11/qem-auditor) by Venkat Allu — an independent auditor for quantum error-mitigation claims, built on this project's `falsify_claim` control-experiment idea (its own README credits it directly), extended into a stricter, error-mitigation-specific verdict ladder (`INVALID` → `REFUTED` → `NOT ESTABLISHED` → `PROMISING` → `CERTIFIED UNDER SCOPE`).
 
 | | |
-|---|---|
+| --- | --- |
 | **Tools** | 48 |
 | **Tests** | 195 — 191 passing, 3 xfailed (external IonQ/IBM account-state issues, not code bugs), 1 xpassed. Composed from today's full run (2 failures) plus a targeted re-run proving the fix; not yet re-confirmed in one single full pass — see POSTMORTEMS.md |
 | **Real bugs caught before they cost anything** | See [POSTMORTEMS.md](POSTMORTEMS.md) for the honest, itemized list — deliberately not reduced to a single count here |
@@ -77,12 +77,14 @@ Before ever submitting a pre-registered experiment (characterizing angle-depende
 That bug wasn't limited to the new experiment. It had already been quietly affecting results shipped in this repo's own test suite — the "isolated entangling effect" reported for a real research circuit moved from **0.0352 to 0.0735** once fixed, meaning the original number had been masking roughly half the real signal.
 
 Fixing it surfaced two more real issues in the same code path:
+
 - The bare `"simulator"` target silently defaults to IonQ's retired Aria-era gate family instead of the modern one used by Forte-class hardware.
 - IonQ's native two-qubit gate is only valid for rotations up to a quarter turn — larger logical rotations need an exact multi-gate decomposition, not a naive 1:1 conversion.
 
 All three are now fixed, and the fix itself became a permanent, general check (`gate_synthesis_check`) rather than a one-off patch — so the next circuit that hits this class of bug gets caught automatically. The angle-error experiment's own safety check still wasn't fully clean right after the fix — correctly, it stayed blocked from real hardware rather than proceeding on an unexplained discrepancy. That discrepancy is now resolved (see below) — it turned out to be a real, separate, interesting finding, not a lingering bug.
 
 **First real hardware confirmation.** A separate experiment — a graded series of entangling search circuits on IonQ, looking for a specific number in Pascal's Triangle — went through the full pipeline this project's discipline requires: checked, cost-estimated, budget-verified, submitted for real, and confirmed. **All three circuits found the right answer on real Forte-Enterprise-1 hardware.** Along the way, this same discipline caught two more real, separate problems before they cost anything:
+
 - An API key silently pointed at the wrong, unfunded organization for an unknown period, while the real funded one had never even had a key generated.
 - A cost estimate quietly wrong by roughly 2x, because two other functions (`estimate_ionq_cost`, `estimate_ionq_gates`) had the same missing gate-decomposition fix as above, just not yet applied there.
 
@@ -96,7 +98,7 @@ Both fixed, both now covered by real tests. **That's 4 real, distinct bugs this 
 
 **`verify_experiment`** — the core safety gate.
 
-```
+```text
 circuit + target device + (optional) expected result
         │
         ▼
@@ -174,7 +176,7 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 ### Core — the Verifier, control-experiment generator, robustness, and learning
 
 | Tool | What it does |
-|------|-------------|
+| ------ | ------------- |
 | `verify_experiment` | The safety gate — semantic, routing, gate-synthesis, and ground-truth checks, ending in a GO/BLOCK verdict |
 | `falsify_claim` | Auto-generates a control circuit (entangling gates removed) and reports the real, confound-isolated effect size — no known answer required |
 | `find_robust_circuit` | Picks the most real-noise-resistant candidate between several circuits, instead of whichever wins in a perfect noiseless simulation |
@@ -190,7 +192,7 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 ### IBM — device intelligence, job lifecycle, and account visibility
 
 | Tool | What it does |
-|------|-------------|
+| ------ | ------------- |
 | `ibm_account_check` | Which IBM instance(s) this account can access and real usage quota status (seconds of QPU time on the free plan — genuinely different from IonQ's dollar budgets, not just re-labeled) |
 | `list_devices` | All accessible IBM backends with live operational status |
 | `get_device_details` | Per-qubit T1/T2, readout error, gate error, queue depth |
@@ -215,7 +217,7 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 ### IonQ — devices, batched submission, cost estimation, account visibility
 
 | Tool | What it does |
-|------|-------------|
+| ------ | ------------- |
 | `ionq_account_check` | Which IonQ project(s)/organization this API key can submit to and their real budget status — flags any at $0. Built after this project spent an unknown stretch of time pointed at the wrong, unfunded organization |
 | `ionq_compare_devices` | Ranks real IonQ hardware by live calibration data (2-qubit fidelity, coherence, gate speed) instead of picking one out of habit |
 | `ionq_preflight` | One call for the full recommended pre-submission sequence — account/budget check, device standing, per-circuit verification, real cost check — returning a single GO/BLOCK verdict |
@@ -231,7 +233,7 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 
 ## Project structure
 
-```
+```text
 quantum-verifier/
 ├── core/
 │   ├── verifier.py            # the safety-gate pipeline
@@ -316,9 +318,16 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 
 ---
 
+## Standalone LLM agent (`agent/`)
+
+A self-contained Node.js agent in [`agent/`](agent/) wraps the MCP server with a multi-provider LLM layer (Gemini, Ollama, OpenAI, Anthropic, vLLM) and exposes a REPL chat interface plus a `POST /chat` HTTP endpoint. It handles tool dispatch and multi-turn conversation against the same 48-tool surface without requiring Claude Desktop or any other MCP host. See [`agent/README.md`](agent/README.md) for setup, provider configuration, Docker instructions, and example queries.
+
+---
+
 ## Roadmap
 
-**Completed**
+### Completed
+
 - [x] `verify_experiment` — semantic, topology, ideal + hardware-aware simulation, ground-truth check
 - [x] `falsify_claim` — auto-generated control circuits, confound-isolated effect size
 - [x] `gate_synthesis_check` — catches gate-family mismatches before they corrupt a simulation
@@ -347,7 +356,8 @@ Restart Claude Desktop. Both tools appear under the hammer icon.
 - [x] **Shared, live Turso database + 2-hour cloud collector, closing the "local calibration history is shallower and laptop-dependent" gap noted above (2026-08-30).** Previously: only a 6-hour laptop LaunchAgent, no cloud backup — any stretch with the laptop off was a permanent gap, and calibration data collected reliably still wasn't actually *read* by anything except whoever's own machine last ran a manual import. Now: `.github/workflows/snapshot.yml` collects IBM + IonQ device, per-qubit, and per-pair history every 2 hours regardless of laptop state; `get_alerts()`/`_recent_drift_alert()` (the real pre-submission safety gate) read live from a shared Turso database via `core/turso.py`, falling back to the local db automatically when Turso isn't configured (e.g. in tests). Same live database is shared with `quantum-hardware-mcp` — both tools now read one current source instead of two independently-drifting local copies.
 - [x] **Widened the shared schema to the FULL field set and migrated the real deep history (2026-08-31).** The first pass above only carried 10 of 30 device fields (missing native gate set, CLOPS, quantum volume, calibration timestamps, etc.) — enough for drift detection, not enough for the deeper reporting tools. Widened via `ALTER TABLE`, then migrated the real depth: **device_snapshots 6,081 rows (2022-01-07 → now), qubit_snapshots 692,955 rows, pair_snapshots 746,456 rows.** `_qubit_fingerprint_vector()` (used by `check_chip_identity`) now reads live from Turso too — closing that gap. Correction to the earlier entry above: this project's own qubit/pair archive was NOT the richer of the two, as originally stated — `quantum-hardware-mcp`'s local archive turned out to be far deeper in both device-level fields and per-qubit/pair row count (686k+/754k+ rows for one device alone, back to its real online date), and is what this migration actually drew from. Also found and fixed a real performance bug: `execute_batch()` sent each row as its own pipeline step, measuring ~9.7s per 500 rows (~50/sec) — confirmed directly, would have made the full ~1.45M-row migration take ~10 hours. Combining same-SQL rows into one multi-row `INSERT` instead measured ~0.35s for the same 500 rows (~1,400/sec, a ~28x difference), verified correct via direct round-trip checks.
 
-**Next**
+### Next
+
 - [ ] Structurally wire this Verifier in as a *mandatory* gate in front of `quantum-hardware-mcp`'s job-submission tools — the specific known bugs are fixed at the source now, but nothing stops a new bug class from reaching hardware unchecked the same way
 - [ ] Postmortem — automatic explanation of *why* a specific prediction was wrong, not just that it was; needs more real failure-mode data than currently exists
 - [ ] Make Experiment Memory shared across users/machines instead of a local file — right now it only gets smarter for whoever is running it (separate from the device-history Turso work above — this is about prediction-vs-reality tracking, not calibration snapshots)
