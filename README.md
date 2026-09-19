@@ -9,7 +9,7 @@ Companion project to [quantum-hardware-mcp](https://github.com/Lokesh-2025/quant
 | | |
 |---|---|
 | **Tools** | 48 |
-| **Tests** | 195 — 191 passing, 3 xfailed (external IonQ/IBM account-state issues, not code bugs), 1 xpassed. Composed from today's full run (2 failures) plus a targeted re-run proving the fix; not yet re-confirmed in one single full pass — see POSTMORTEMS.md |
+| **Tests** | 232 passed, 4 xfailed (external IonQ/IBM account-state issues, not code bugs), 0 failed — one full pass, 2026-09-19, after the provider-adapter refactor below |
 | **Real bugs caught before they cost anything** | See [POSTMORTEMS.md](POSTMORTEMS.md) for the honest, itemized list — deliberately not reduced to a single count here |
 | **Real hardware confirmed** | 3/3 circuits, Forte-Enterprise-1 |
 | **License** | MIT |
@@ -90,6 +90,12 @@ Both fixed, both now covered by real tests. **That's 4 real, distinct bugs this 
 
 **The angle-error discrepancy, resolved.** The residual issue blocking that first experiment turned out to be a missing term in the analysis model — decay that scales with circuit *duration*, not gate angle — not a bug and not real angle-dependence. Restricting the fit to short-duration data gives a result consistent with zero angle-dependence, confirmed by refitting on progressively longer data and watching the effect climb in exactly the pattern the missing-term hypothesis predicts. That's a genuine, honest answer to the original research question — the first public characterization of this behavior for Forte-class hardware — not a stuck experiment quietly abandoned.
 
+**Closing a real architectural gap: the provider-adapter refactor (2026-09-19).** Fixing the RZZ→native-ZZ bug and the `estimate_ionq_cost`/`estimate_ionq_gates` gate-decompose gap left `core/verifier.py` carrying its own second, hand-typed copy of `_decompose_large_angle_rzz`/`_register_ionq_native_equivalences`, alongside `providers/ionq.py`'s. Both copies were correct and identical at the time — but nothing enforced they'd *stay* identical, which is exactly the kind of quiet drift risk this project exists to catch in other people's code, not leave sitting in its own.
+
+Fixed by introducing a real `QuantumBackendAdapter` interface (`adapters/`): `topology_check`, `hardware_aware_simulation`, and `verify()` no longer branch on `if provider == "ionq"` anywhere in their own bodies — they dispatch through `adapters/ibm.py`/`adapters/ionq.py` behind one shared interface, with capability flags (`supports_estimate_gates`, `supports_cancel_job`, etc.) instead of vendor-name string checks. The duplicated RZZ-decompose logic collapsed into one source of truth (`providers/ionq.py`), with a regression test (`tests/test_rzz_decompose_shared.py`) asserting object identity so a second copy can't quietly reappear.
+
+Every existing tool name and signature is unchanged — verified against real IBM/IonQ APIs at every migration step, including a manual check confirming `submit_job`'s drift gate still blocks before touching real hardware and `ionq_submit_job`'s free-simulator path still bills nothing. Full suite: 232 passed, 4 xfailed, 0 failed.
+
 ---
 
 ## What it does
@@ -166,6 +172,8 @@ Deliberately left out: the Pascal's Triangle/Singmaster's-specific tools, the ch
 **Two real, minimal, well-tested exceptions to "untouched":** both correctness bugs in `quantum-hardware-mcp`'s own `ionq_submit_job` self-check — the missing RZZ→native-ZZ equivalence and the bare-`"simulator"`-gateset default — were ported back into that repo directly, since both were silently mispredicting results in that function's own stated safety guarantee. Nothing else in the main repo was touched; its full existing test suite (92/92) passed unchanged before each commit.
 
 **Still a real gap, not yet closed:** these remain two separate tool sets, and nothing structurally forces `quantum-hardware-mcp`'s job-submission tools to route through this Verifier's full pipeline first — an assistant using the main tool today could still submit straight to hardware without calling `verify_experiment` or `ionq_preflight`. The specific bug that gap would have caught is now fixed at the source either way, but the general "automatic, no way around it" gate this project originally set out to build is still not structurally enforced.
+
+**Also not yet ported:** the `QuantumBackendAdapter` refactor described above exists only in this repo so far. `quantum-hardware-mcp/server.py` has the same shape of problem (IBM/IonQ implemented as two independent, differently-named function sets with no shared interface), and an equivalent refactor for it has been scoped and designed but not yet applied — a deliberate, separate decision, not an oversight.
 
 ---
 
