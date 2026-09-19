@@ -11,8 +11,13 @@ contextvar.
 from adapters.base import QuantumBackendAdapter
 from adapters.ibm import IBMAdapter
 from adapters.ionq import IonQAdapter
+from adapters.pennylane_adapter import PennyLaneAdapter
+from adapters.cudaq_adapter import CudaQAdapter
 
-_ADAPTER_CLASSES = {"ibm": IBMAdapter, "ionq": IonQAdapter}
+_ADAPTER_CLASSES = {
+    "ibm": IBMAdapter, "ionq": IonQAdapter,
+    "pennylane": PennyLaneAdapter, "cudaq": CudaQAdapter,
+}
 _instances: dict[str, QuantumBackendAdapter] = {}
 
 

@@ -36,6 +36,8 @@ from core.memory import shadow_mode_disagreement_log as _shadow_mode_disagreemen
 from core.intelligence import recommend_tolerance as _recommend_tolerance
 from core.templates import run_ghz_parity_check as _run_ghz_parity_check
 from core.templates import run_graph_coloring_search as _run_graph_coloring_search
+from core.hybrid_reduction_loop import run_hybrid_reduction_loop as _run_hybrid_reduction_loop
+from core.gradient_analysis import analyze_gradients_from_spec as _analyze_gradients_from_spec
 from core.optimal_backend import find_optimal_backend as _find_optimal_backend
 from core.multi_compiler import diff_compilers as _diff_compilers
 from core.stabilizer import verify_stabilizer_circuit as _verify_stabilizer_circuit
@@ -108,8 +110,16 @@ def verify_experiment(
 
     Args:
         qasm_string   : OpenQASM 2.0 circuit string
-        provider      : "ibm" or "ionq"
-        target_device : e.g. "ibm_fez", "forte-1", "simulator"
+        provider      : "ibm", "ionq", "pennylane", or "cudaq". The latter
+                        two run free, local, noiseless simulation (no API
+                        key needed) — useful for a quick sanity check or
+                        an independent cross-check before spending real
+                        hardware time on "ibm"/"ionq".
+        target_device : e.g. "ibm_fez", "forte-1", "simulator" for IBM/IonQ;
+                        "default.qubit"/"lightning.qubit" for pennylane;
+                        "qpp-cpu" for cudaq (its own target selection picks
+                        "nvidia" automatically when real GPU hardware is
+                        available, no action needed from the caller)
         shots         : shots for the simulation passes (default 4096)
         expected_marked_bitstrings : optional, target bitstrings for a known-answer check
         expected_amplification     : optional, predicted amplification to verify against
@@ -225,14 +235,22 @@ def falsify_claim(
     Args:
         qasm_string        : OpenQASM 2.0 circuit string, must contain at
                               least one entangling (two-qubit) gate
-        provider            : "ibm" or "ionq" — both now return real counts.
-                              IonQ: full noisy simulation on the free
-                              simulator with IonQ's real named noise model.
-                              IBM: a local Aer noisy simulation using a
-                              noise model built from this backend's real,
-                              live calibration data (NoiseModel.from_backend)
-                              — zero QPU time spent.
-        target_device       : e.g. "forte-1", "simulator"
+        provider            : "ibm", "ionq", "pennylane", or "cudaq" — all
+                              four now return real counts. IonQ: full noisy
+                              simulation on the free simulator with IonQ's
+                              real named noise model. IBM: a local Aer
+                              noisy simulation using a noise model built
+                              from this backend's real, live calibration
+                              data (NoiseModel.from_backend) — zero QPU
+                              time spent. PennyLane/cudaq: noiseless exact
+                              simulation, no hardware noise model exists
+                              for a pure simulator — useful for isolating
+                              a claimed entangling effect with zero noise
+                              in the picture at all, before checking
+                              whether it survives real hardware noise too.
+        target_device       : e.g. "forte-1", "simulator" for IBM/IonQ;
+                              "default.qubit" for pennylane; "qpp-cpu" for
+                              cudaq
         marked_bitstrings   : optional — if you have a specific claimed
                               target, isolates its real effect size
         shots               : shots per circuit (default 4096)
@@ -298,6 +316,83 @@ def run_graph_coloring_search(
     """
     return json.dumps(
         _run_graph_coloring_search(edges, n_vertices, provider, target_device, p_layers, gamma, beta, shots, top_n),
+        indent=2,
+    )
+
+
+@mcp.tool()
+@_track_invocation
+def run_hybrid_reduction_loop(
+    edges: list,
+    n_vertices: int,
+    provider: str,
+    target_device: str,
+    max_rounds: int = 5,
+    shots: int = 4096,
+    top_n: int = 10,
+    initial_p_layers: int = 3,
+    initial_gamma: float = 1.0,
+    initial_beta: float = 0.8,
+) -> str:
+    """
+    Real iterative classical-quantum reduction loop for graph-coloring
+    (an Ising/QUBO-shaped optimization problem) -- the genuine pattern
+    real published hybrid work (e.g. railway rescheduling) uses: run the
+    LNAA-style oracle, classically verify candidates for free (O(edges)
+    per candidate), and if no valid coloring was found, use the REAL
+    result to refine the oracle's parameters (strengthen the RZZ
+    phase-kick relative to the RX mixer, add depth if still far from
+    valid) before trying again. Sits alongside run_graph_coloring_search
+    (a single round) rather than replacing it.
+
+    Returns the verified answer (if found) plus a full round-by-round
+    log of every parameter set tried and its real outcome, so this is
+    auditable, not a black box.
+
+    provider can be "ibm", "ionq", "pennylane", or "cudaq" -- the latter
+    two run free, local simulation (no API key needed), useful for
+    iterating on parameters before spending real hardware time.
+    """
+    return json.dumps(
+        _run_hybrid_reduction_loop(edges, n_vertices, provider, target_device, max_rounds,
+                                    shots, top_n, initial_p_layers, initial_gamma, initial_beta),
+        indent=2,
+    )
+
+
+@mcp.tool()
+@_track_invocation
+def analyze_circuit_gradients(
+    gate_spec: list,
+    params: list,
+    n_qubits: int,
+    observable_wire: int = 0,
+    barren_plateau_gradient_norm_threshold: float = 1e-2,
+    near_zero_gradient_threshold: float = 1e-3,
+) -> str:
+    """
+    Pre-submission structural analysis of a PARAMETERIZED circuit using
+    PennyLane's real autodiff -- genuinely different from running on a
+    simulator: uses gradients to find out something about the circuit's
+    STRUCTURE (barren-plateau risk, candidate redundant/cancelling gate
+    pairs) before it's even bound to concrete angles and turned into
+    QASM. This is one lifecycle stage earlier than verify()'s QASM
+    entrypoint, not wired into that pipeline -- call this first, while
+    still designing/tuning an ansatz.
+
+    gate_spec: list of gate instruction dicts describing the circuit, one of:
+      {"gate": "rx"|"ry"|"rz", "wire": int, "param_index": int}
+      {"gate": "h"|"x"|"y"|"z", "wire": int}
+      {"gate": "cnot"|"cz", "wires": [control, target]}
+    params: the concrete parameter values to evaluate gradients at.
+    observable_wire: which qubit's PauliZ expectation to use as the cost
+      (default 0) -- a generic proxy; a circuit with a specific claimed
+      cost function should be analyzed with that instead.
+    """
+    return json.dumps(
+        _analyze_gradients_from_spec(gate_spec, params, n_qubits, observable_wire,
+                                      barren_plateau_gradient_norm_threshold,
+                                      near_zero_gradient_threshold),
         indent=2,
     )
 

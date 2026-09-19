@@ -949,6 +949,18 @@ CHECK_TAXONOMY = {
                       "equivalence, the RZZ->native-ZZ bug this check exists "
                       "because of), not a claim about measurement outcomes.",
     },
+    "classical_reduction_check": {
+        "kind": "mundane_explanation",
+        "rationale": "Not a claim about hardware noise or the result -- checks "
+                      "whether the circuit is exactly classically resolvable "
+                      "(deferring to core/stabilizer.py's exact tableau for "
+                      "Clifford circuits, never reinventing that) and measures "
+                      "the real, unmodified circuit's exact entanglement entropy "
+                      "via an independent cudaq statevector cross-check against "
+                      "qiskit's own. Standalone, informational only -- wired "
+                      "into verify()'s pipeline as of 2026-09-19, never gates "
+                      "the verdict.",
+    },
     "required_shots_check": {
         "kind": "structural",
         "rationale": "A feasibility/power check computed BEFORE any data is "
@@ -1119,6 +1131,18 @@ def verify(
         return {**result, "verdict": "BLOCK",
                 "reason": "Topology check failed — real routing overhead expected.",
                 "details": topo}
+
+    # Classical-reduction check (added 2026-09-19, informational only, same
+    # "earn integration before it can BLOCK" pattern ground_truth_significance_test
+    # and register_mapping_check both followed). Runs unconditionally, NOT gated
+    # through get_adapter(provider)'s capability flags -- this uses cudaq (if
+    # installed) purely as an independent classical computation engine, checking
+    # whether the circuit is exactly classically resolvable (deferring to
+    # core/stabilizer.py for Clifford circuits, never reinventing that) and
+    # measuring its real entanglement entropy, regardless of which provider
+    # `provider` names.
+    from core.classical_reduction import classical_reduction_check
+    result["classical_reduction_check"] = classical_reduction_check(circuit)
 
     # Mundane-explanations check (added 2026-08-28, wired in per the same
     # "earn integration first" pattern ground_truth_significance_test used

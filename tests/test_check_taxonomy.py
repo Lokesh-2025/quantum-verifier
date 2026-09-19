@@ -50,8 +50,8 @@ def test_taxonomy_covers_every_check_verify_actually_runs():
     """Cross-check against verify()'s real result keys for a run that
     exercises every optional path -- nothing verify() reports should be
     absent from the triage table."""
-    ran_checks = {"semantic_check", "topology_check", "required_shots_check",
-                  "ground_truth_check", "ground_truth_significance_test"}
+    ran_checks = {"semantic_check", "topology_check", "classical_reduction_check",
+                  "required_shots_check", "ground_truth_check", "ground_truth_significance_test"}
     table = v.check_taxonomy()
     missing = ran_checks - set(table.keys())
     assert not missing, f"verify() reports checks missing from the taxonomy: {missing}"
