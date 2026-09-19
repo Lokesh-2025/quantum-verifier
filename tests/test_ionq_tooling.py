@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
 from providers.ionq import (
     ionq_account_check, ionq_compare_devices, ionq_submit_job, ionq_preflight,
     _check_budget_before_submitting, _decompose_large_angle_rzz,
+    ionq_devices, get_device_details,
 )
 from core.robustness import find_robust_circuit
 from qiskit import QuantumCircuit
@@ -64,6 +65,22 @@ def test_compare_devices_excludes_simulators():
     result = ionq_compare_devices()
     names = [d["name"] for d in result["devices"]]
     assert not any("simulator" in n.lower() for n in names)
+
+
+# ------------------------------------------------------------- get_device_details
+
+def test_get_device_details_matches_a_real_device_from_the_list():
+    devices = ionq_devices()
+    assert isinstance(devices, list) and len(devices) >= 1
+    target = devices[0]
+    result = get_device_details(target["name"])
+    assert "error" not in result
+    assert result == target
+
+
+def test_get_device_details_reports_a_clear_error_for_an_unknown_device():
+    result = get_device_details("not-a-real-ionq-device-name")
+    assert "error" in result
 
 
 # ------------------------------------------------------------- find_robust_circuit

@@ -32,69 +32,16 @@ Pipeline:
 """
 import math
 
-from qiskit import QuantumCircuit, transpile
-from qiskit.circuit import Parameter
-from qiskit.circuit.library import RZZGate
-from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary as _sel
-from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+from qiskit import QuantumCircuit
 
-from providers.ibm import _get_service, _cx_errors_for_backend
-
-HEAVY_HEX_MAX_DEGREE = 3
-
-# Qiskit's transpiler has no direct equivalence between RZZGate (radians) and
-# IonQ's native ZZGate (turns), even though they are the exact same physical
-# gate — RZZ(theta) = exp(-i*theta/2 * Z@Z) and native ZZ(phi) = exp(-i*pi*phi
-# * Z@Z), so phi = theta/(2*pi) is an EXACT match, verified via Operator
-# comparison (identical, not just up to global phase). Without this
-# registered, the transpiler falls back to general two-qubit unitary
-# synthesis: a single rzz between two H gates transpiled to 2 native zz
-# gates (should be 1) plus ~39 extraneous single-qubit gpi/gpi2 gates. That
-# silently produced a wrong "hardware-aware simulation" for any circuit
-# containing rzz — caught via the free-simulator control-arm check for the
-# Forte angle-error experiment before it ever reached real hardware.
-#
-# RXX and RYY were checked for the same pattern and do NOT have it: an
-# isolated rxx/ryy against IonQ's real native basis showed extra gpi/gpi2
-# gates too, but that's the real, unavoidable cost of basis-change gates
-# (H, S) on this hardware -- confirmed directly, a bare isolated H alone
-# already costs 2 gpi2 + 1 gpi, and RXX needs 4 of them, exactly accounting
-# for the total seen. Not a missing equivalence; no fix needed or applied.
-def _register_ionq_native_equivalences():
-    try:
-        from qiskit_ionq.ionq_gates import ZZGate as _IonQZZGate
-    except ImportError:
-        return
-    theta = Parameter("theta")
-    equiv = QuantumCircuit(2)
-    equiv.append(_IonQZZGate(theta / (2 * math.pi)), [0, 1])
-    _sel.add_equivalence(RZZGate(theta), equiv)
-
-
-_register_ionq_native_equivalences()
-
-# IonQ's native ZZ gate is only valid for |theta_turns| <= 0.25 (a quarter
-# turn) -- confirmed via a real IonQ API rejection ("angle must be >= -0.25")
-# when the E1_RING circuit's large rzz angles (>pi/2 radians) hit the 1:1
-# equivalence above. Splitting into N chained smaller RZZ applications is
-# mathematically EXACT, not an approximation: ZZ generators on the same
-# qubit pair commute, so N reps of RZZ(theta/N) = RZZ(theta) exactly (the
-# same identity the angle-error experiment's own protocol relies on).
-IONQ_NATIVE_ZZ_MAX_TURNS = 0.25
-
-
-def _decompose_large_angle_rzz(circuit: QuantumCircuit) -> QuantumCircuit:
-    new_qc = circuit.copy_empty_like()
-    for instruction in circuit.data:
-        if instruction.operation.name == "rzz":
-            theta = float(instruction.operation.params[0])
-            theta_turns = theta / (2 * math.pi)
-            n_chunks = max(1, math.ceil(abs(theta_turns) / IONQ_NATIVE_ZZ_MAX_TURNS))
-            for _ in range(n_chunks):
-                new_qc.rzz(theta / n_chunks, instruction.qubits[0], instruction.qubits[1])
-        else:
-            new_qc.append(instruction.operation, instruction.qubits, instruction.clbits)
-    return new_qc
+# RZZ-to-native-ZZ equivalence registration and the large-angle decompose
+# helper used to be duplicated here (hand-typed, not imported) alongside an
+# identical copy in providers/ionq.py, with nothing enforcing the two stayed
+# in sync. providers/ionq.py has no module-level dependency back on this
+# module (its only core.verifier references are function-local), so this
+# import is safe in either module-load order, and it makes providers/ionq.py
+# the single source of truth instead of two independently-maintained copies.
+from providers.ionq import _decompose_large_angle_rzz, _register_ionq_native_equivalences  # noqa: F401
 
 
 def _parse(qasm_string: str) -> QuantumCircuit:
@@ -154,37 +101,13 @@ def topology_check(circuit: QuantumCircuit, provider: str) -> dict:
     documented). IonQ is all-to-all, so this risk structurally does not
     exist there — returned explicitly as a no-op, not silently skipped, so
     a caller can tell "checked, and safe" apart from "not applicable."
+
+    Dispatches through adapters.registry instead of an inline if/else —
+    the vendor-specific bodies (IBM's heavy-hex degree math, IonQ's no-op)
+    now live in adapters/ibm.py and adapters/ionq.py respectively.
     """
-    if provider == "ionq":
-        return {"applicable": False, "passed": True,
-                "note": "IonQ is all-to-all connected — no routing/degree risk exists for this provider."}
-
-    from collections import defaultdict
-    neighbors = defaultdict(set)
-    for instruction in circuit.data:
-        if len(instruction.qubits) == 2:
-            a = circuit.find_bit(instruction.qubits[0]).index
-            b = circuit.find_bit(instruction.qubits[1]).index
-            neighbors[a].add(b)
-            neighbors[b].add(a)
-
-    violations = []
-    for qubit, nbrs in sorted(neighbors.items()):
-        degree = len(nbrs)
-        excess = max(0, degree - HEAVY_HEX_MAX_DEGREE)
-        if excess > 0:
-            violations.append({"qubit": qubit, "degree": degree,
-                                "estimated_extra_cx": excess * 3})
-
-    passed = len(violations) == 0
-    return {
-        "applicable": True, "passed": passed,
-        "heavy_hex_max_degree": HEAVY_HEX_MAX_DEGREE,
-        "violations": violations,
-        "note": ("All qubits within degree-3 limit." if passed else
-                 f"{len(violations)} qubit(s) exceed the degree-3 limit — "
-                 "real routing overhead expected, gate count may inflate 3-5x."),
-    }
+    from adapters.registry import get_adapter
+    return get_adapter(provider).check_topology(circuit)
 
 
 # ---------------------------------------------------------------- step 3
@@ -310,104 +233,12 @@ def hardware_aware_simulation(circuit: QuantumCircuit, provider: str, target_dev
     This is weaker than a full noisy simulation — IBM's public API doesn't
     expose an equivalent named noise model the way IonQ's does — and that
     asymmetry is stated here explicitly rather than papered over.
+
+    Dispatches through adapters.registry instead of an inline if/else — the
+    vendor-specific bodies now live in adapters/ibm.py and adapters/ionq.py.
     """
-    if provider == "ionq":
-        from qiskit_ionq import IonQProvider
-        import os
-        api_key = os.getenv("IONQ_API_KEY")
-        if not api_key:
-            return {"error": "IONQ_API_KEY not set"}
-        from providers.ionq import _resolve_ionq_backend, _ionq_is_hardware
-        try:
-            resolved = _resolve_ionq_backend(target_device)
-            ionq_provider = IonQProvider(api_key)
-            # Transpiling against the bare "ionq_simulator" target silently picks
-            # its DEFAULT native gateset, which is the legacy Aria-only MS gate,
-            # not Forte's zz -- the exact trap estimate_ionq_gates/estimate_ionq_cost
-            # already document and avoid by defaulting to forte-1's real target.
-            # A gate-count/structure check needs a REAL device's native gateset
-            # even when no noise model will be applied (no specific hardware
-            # requested), so target the transpile at forte-1 in that case while
-            # still executing on the free simulator with no noise.
-            transpile_target_name = "qpu.forte-1" if resolved == "ionq_simulator" else resolved
-            target_backend = ionq_provider.get_backend(transpile_target_name, gateset="native")
-            sim_backend = ionq_provider.get_backend("ionq_simulator", gateset="native")
-            if _ionq_is_hardware(resolved):
-                sim_backend.set_options(noise_model=resolved.replace("qpu.", ""))
-            # Split any rzz beyond the native gate's valid angle range BEFORE
-            # transpiling, so the 1:1 equivalence applies cleanly to every chunk
-            # instead of the transpiler rejecting/mis-synthesizing an out-of-range angle.
-            decomposed_circuit = _decompose_large_angle_rzz(circuit)
-            t_qc = transpile(decomposed_circuit, backend=target_backend, optimization_level=1)
-            sim_job = sim_backend.run(t_qc, shots=shots)
-            counts = sim_job.result().get_counts()
-        except Exception as e:
-            return {"error": f"IonQ hardware-aware simulation failed: {e}"}
-        noise_model_used = sim_backend.options.noise_model
-        simulation_type = (
-            f"full noisy simulation using {noise_model_used}'s real, named noise model"
-            if noise_model_used and noise_model_used != "ideal"
-            else "ideal simulation, no noise model applied (target was the free simulator, not real hardware)"
-        )
-        return {
-            "counts": counts, "total_shots": sum(counts.values()),
-            "noise_model_used": noise_model_used,
-            "transpiled_gate_count": t_qc.size(),
-            "simulation_type": simulation_type,
-            "gate_synthesis_check": gate_synthesis_check(decomposed_circuit, t_qc),
-        }
-
-    # IBM
-    service = _get_service()
-    try:
-        backend = service.backend(target_device)
-    except Exception as e:
-        return {"error": f"Device '{target_device}' not found: {e}"}
-    pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
-    isa_circuit = pm.run(circuit)
-    transpiled_gates = dict(isa_circuit.count_ops())
-    n_cx = transpiled_gates.get("cx", 0) + transpiled_gates.get("ecr", 0) + transpiled_gates.get("cz", 0)
-    props = backend.properties()
-    cx_errors = _cx_errors_for_backend(props) if props else []
-    avg_cx_error = sum(cx_errors) / len(cx_errors) if cx_errors else 0.005
-    estimated_fidelity = round((1 - avg_cx_error) ** n_cx, 4) if n_cx > 0 else 1.0
-
-    # Real noisy simulation, not just a product-of-errors estimate: build an
-    # Aer noise model from this backend's ACTUAL live calibration data
-    # (qiskit_aer.noise.NoiseModel.from_backend), then run it locally, for
-    # free -- no QPU time spent. This is the same shape as IonQ's free-
-    # simulator-with-a-real-named-noise-model path, closing a real gap:
-    # falsify_claim needs actual counts to compare real-vs-control, and an
-    # estimate alone can't provide that. Previously IBM had no counts here
-    # at all, so falsify_claim only worked on the IonQ path -- confirmed
-    # directly against the code, not assumed.
-    counts, total_shots, noisy_sim_error = None, None, None
-    try:
-        from qiskit_aer import AerSimulator
-        from qiskit_aer.noise import NoiseModel
-        noise_model = NoiseModel.from_backend(backend)
-        noisy_backend = AerSimulator(noise_model=noise_model, coupling_map=backend.coupling_map,
-                                      basis_gates=noise_model.basis_gates)
-        noisy_job = noisy_backend.run(isa_circuit, shots=shots)
-        counts = noisy_job.result().get_counts()
-        total_shots = sum(counts.values())
-    except Exception as e:
-        noisy_sim_error = str(e)
-
-    return {
-        "counts": counts, "total_shots": total_shots,
-        "estimated_fidelity": estimated_fidelity,
-        "transpiled_gate_count": sum(transpiled_gates.values()),
-        "n_two_qubit_gates": n_cx,
-        "simulation_type": (
-            "full noisy simulation using a local Aer noise model built from this backend's real, "
-            "live calibration data (qiskit_aer NoiseModel.from_backend) -- plus a calibration-based "
-            "fidelity estimate for backward compatibility"
-            if counts is not None else
-            f"fidelity estimate only -- real noisy simulation failed: {noisy_sim_error}"
-        ),
-        "gate_synthesis_check": gate_synthesis_check(circuit, isa_circuit),
-    }
+    from adapters.registry import get_adapter
+    return get_adapter(provider).simulate_hardware_aware(circuit, target_device, shots)
 
 
 def cross_check_fidelity_estimate(circuit: QuantumCircuit, hw_result: dict, shots: int = 4096) -> dict:
@@ -1326,8 +1157,10 @@ def verify(
                            "than real hardware overhead.",
                 "details": gsc}
 
-    if provider == "ibm":
-        result["fidelity_cross_check"] = cross_check_fidelity_estimate(circuit, hw, shots)
+    from adapters.registry import get_adapter
+    adapter = get_adapter(provider)
+    if adapter.supports_fidelity_cross_check:
+        result["fidelity_cross_check"] = adapter.cross_check_fidelity(circuit, hw, shots)
 
     if expected_marked_bitstrings and expected_amplification is not None:
         gt = ground_truth_check(hw.get("counts"), expected_marked_bitstrings,

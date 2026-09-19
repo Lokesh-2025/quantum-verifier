@@ -115,6 +115,21 @@ def ionq_devices() -> dict | list:
         return {"error": str(e)}
 
 
+def get_device_details(device_name: str) -> dict:
+    """
+    Details for a single IonQ device. IonQ's API only exposes a list
+    endpoint (ionq_devices), not a per-device lookup — this filters that
+    list, so it costs one full list call, not a cheaper direct one.
+    """
+    devices = ionq_devices()
+    if isinstance(devices, dict) and "error" in devices:
+        return devices
+    for d in devices:
+        if d["name"] == device_name:
+            return d
+    return {"error": f"Device '{device_name}' not found among IonQ backends."}
+
+
 _JOB_FLOOR_USD = 168.20
 _KNOWN_ABOVE_FLOOR_POINT_2Q_GATES = 600
 _KNOWN_ABOVE_FLOOR_POINT_USD = 3294.87

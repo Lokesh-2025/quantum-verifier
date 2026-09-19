@@ -42,6 +42,7 @@ from core.stabilizer import verify_stabilizer_circuit as _verify_stabilizer_circ
 from core.stabilizer import verify_stabilizer_hardware_result as _verify_stabilizer_hardware_result
 import providers.ibm as ibm
 import providers.ionq as ionq
+from adapters.registry import get_adapter
 
 _fastmcp_kwargs = {}
 if _args.port is not None:
@@ -309,14 +310,14 @@ def run_graph_coloring_search(
 @_track_invocation
 def list_devices() -> str:
     """All accessible IBM backends with live operational status."""
-    return json.dumps(ibm.list_devices(), indent=2)
+    return json.dumps(get_adapter("ibm").list_devices(), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def get_device_details(device_name: str) -> str:
     """Per-qubit T1/T2, readout error, gate error, queue depth."""
-    return json.dumps(ibm.get_device_details(device_name), indent=2)
+    return json.dumps(get_adapter("ibm").get_device_details(device_name), indent=2)
 
 
 @mcp.tool()
@@ -392,36 +393,38 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
         device had a real calibration alert (T1/T2 drop, cx/readout error
         spike) in the last 24 hours — checked automatically every call.
     """
-    return json.dumps(ibm.submit_job(device_name, qasm_string, shots, qasm_version,
-                                      initial_layout, confirm_despite_drift_alert), indent=2)
+    return json.dumps(get_adapter("ibm").submit_job(
+        device_name, qasm_string, shots, qasm_version=qasm_version,
+        initial_layout=initial_layout, confirm_despite_drift_alert=confirm_despite_drift_alert,
+    ), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def job_status(job_id: str) -> str:
     """Status of a submitted IBM job."""
-    return json.dumps(ibm.job_status(job_id), indent=2)
+    return json.dumps(get_adapter("ibm").job_status(job_id), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def job_results(job_id: str) -> str:
     """Measurement counts from a completed IBM job."""
-    return json.dumps(ibm.job_results(job_id), indent=2)
+    return json.dumps(get_adapter("ibm").job_results(job_id), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def cancel_job(job_id: str) -> str:
     """Cancel a queued or running IBM job."""
-    return json.dumps(ibm.cancel_job(job_id), indent=2)
+    return json.dumps(get_adapter("ibm").cancel_job(job_id), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def list_jobs(limit: int = 10) -> str:
     """Most recently submitted IBM jobs."""
-    return json.dumps(ibm.list_jobs(limit), indent=2)
+    return json.dumps(get_adapter("ibm").list_jobs(limit), indent=2)
 
 
 @mcp.tool()
@@ -474,7 +477,7 @@ def job_analytics() -> str:
 @_track_invocation
 def ionq_devices() -> str:
     """All IonQ backends and simulators with live status."""
-    return json.dumps(ionq.ionq_devices(), indent=2)
+    return json.dumps(get_adapter("ionq").list_devices(), indent=2)
 
 
 @mcp.tool()
@@ -494,10 +497,12 @@ def ionq_submit_job(
     self-check against the real target device's noise model before
     anything is billed. Prefer calling verify_experiment first.
     """
-    return json.dumps(ionq.ionq_submit_job(
-        backend_name, qasm_circuits, shots, optimization_level,
-        expected_marked_bitstrings, expected_amplification,
-        amplification_tolerance, confirm_real_hardware,
+    return json.dumps(get_adapter("ionq").submit_job(
+        backend_name, qasm_circuits, shots, optimization_level=optimization_level,
+        expected_marked_bitstrings=expected_marked_bitstrings,
+        expected_amplification=expected_amplification,
+        amplification_tolerance=amplification_tolerance,
+        confirm_real_hardware=confirm_real_hardware,
     ), indent=2)
 
 
@@ -505,28 +510,29 @@ def ionq_submit_job(
 @_track_invocation
 def ionq_job_status(job_id: str, backend_name: str = "ionq_simulator") -> str:
     """Status of a submitted IonQ job."""
-    return json.dumps(ionq.ionq_job_status(job_id, backend_name), indent=2)
+    return json.dumps(get_adapter("ionq").job_status(job_id, backend_name=backend_name), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def ionq_job_results(job_id: str, backend_name: str = "simulator") -> str:
     """Measurement counts from a completed IonQ job."""
-    return json.dumps(ionq.ionq_job_results(job_id, backend_name), indent=2)
+    return json.dumps(get_adapter("ionq").job_results(job_id, backend_name=backend_name), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def estimate_ionq_gates(qasm_string: str, backend_name: str = "forte-1", optimization_level: int = 1) -> str:
     """Native gate count (GPI/GPI2/ZZ) for a circuit before submitting."""
-    return json.dumps(ionq.estimate_ionq_gates(qasm_string, backend_name, optimization_level), indent=2)
+    return json.dumps(
+        get_adapter("ionq").estimate_gates(qasm_string, backend_name, optimization_level), indent=2)
 
 
 @mcp.tool()
 @_track_invocation
 def estimate_ionq_cost(qasm_circuits: list, shots: int = 4096) -> str:
     """Dollar cost preview using IonQ's real per-job pricing floor."""
-    return json.dumps(ionq.estimate_ionq_cost(qasm_circuits, shots), indent=2)
+    return json.dumps(get_adapter("ionq").estimate_cost(qasm_circuits, shots), indent=2)
 
 
 @mcp.tool()
@@ -561,9 +567,11 @@ def ionq_preflight(
     arguments to ionq_submit_job (with confirm_real_hardware=True) once
     this returns GO.
     """
-    return json.dumps(ionq.ionq_preflight(
+    return json.dumps(get_adapter("ionq").preflight_check(
         qasm_circuits, target_device, shots,
-        expected_marked_bitstrings, expected_amplification, amplification_tolerance,
+        expected_marked_bitstrings=expected_marked_bitstrings,
+        expected_amplification=expected_amplification,
+        amplification_tolerance=amplification_tolerance,
     ), indent=2)
 
 
