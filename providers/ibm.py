@@ -721,28 +721,80 @@ def device_on_date(device_name: str, date: str) -> dict:
     }
 
 
-def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2,
+def _tile_circuits(circuits: list) -> tuple:
+    """
+    Combine N independent circuits into ONE circuit by placing each at its
+    own contiguous qubit/clbit offset via QuantumCircuit.compose() -- no
+    coupling between rails, each keeps its own gates and measurements,
+    addressed at its own range. Cleaner than manually offsetting every
+    instruction (the approach quantum-hardware-mcp's run_parallel_
+    collision_search used) since compose() handles both qubits and clbits
+    in one call, including measurements, without touching instruction
+    internals by hand.
+
+    Returns (combined_circuit, rail_ranges) where rail_ranges[i] =
+    (qubit_offset, num_qubits) for circuits[i] -- needed later to slice
+    the aggregate measurement string back into each rail's own result.
+    Qiskit's bitstring convention puts clbit 0 rightmost in the string
+    for the WHOLE register, so rail i's slice is
+    full_bits[total_qubits - offset - nq : total_qubits - offset],
+    confirmed directly against a real 2-rail run (Bell pair + isolated X)
+    before this was written into production code.
+    """
+    total_qubits = sum(c.num_qubits for c in circuits)
+    combined = QuantumCircuit(total_qubits, total_qubits)
+    offset = 0
+    rail_ranges = []
+    for c in circuits:
+        nq = c.num_qubits
+        combined.compose(c, qubits=list(range(offset, offset + nq)),
+                          clbits=list(range(offset, offset + nq)), inplace=True)
+        rail_ranges.append((offset, nq))
+        offset += nq
+    return combined, rail_ranges
+
+
+def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version: int = 2,
                 initial_layout: list = None, confirm_despite_drift_alert: bool = False) -> dict:
     """
-    Compile and submit a circuit to an IBM quantum computer.
+    Compile and submit one or more circuits to an IBM quantum computer.
 
+    qasm_circuits : a single QASM string (the original, still-default
+        shape), or a list of QASM strings. IBM's real API has no native
+        multi-circuit-per-job batching the way IonQ's does -- passing more
+        than one circuit here tiles them into ONE combined circuit via
+        qubit-offset placement (see _tile_circuits) and submits that single
+        combined circuit as one job. The returned dict's "rail_ranges"
+        field (only present when >1 circuit was given) tells a caller
+        which qubit range each input circuit landed at, needed to decode
+        the aggregate measurement string back into each rail's own result.
     initial_layout : optional list of physical qubit indices, one per
-        logical qubit in order. Without it, the transpiler picks its own
-        layout automatically -- fine in general, but it means a separately
-        verified qubit selection (e.g. specific low-error qubits, confirmed
-        SWAP-free for a specific circuit) is NOT guaranteed to be what
-        actually runs. Pass it explicitly whenever the submission needs to
-        match a layout that was already checked.
+        logical qubit in order. Only valid for a single-circuit submission
+        -- a specific physical layout isn't a meaningful concept once
+        multiple independent circuits are tiled together, so this is
+        rejected (a clear error, not silently ignored) when qasm_circuits
+        is a list of more than one circuit.
     confirm_despite_drift_alert : must be True to submit anyway if this
         device had a real calibration alert (T1/T2 drop, or cx/readout
         error spike) in the last 24 hours, checked automatically against
         this project's own local history. Ported from quantum-hardware-mcp
         2026-08-24.
     """
-    try:
-        circuit = qiskit_qasm3.loads(qasm_string) if qasm_version == 3 else QuantumCircuit.from_qasm_str(qasm_string)
-    except Exception as e:
-        return {"error": f"Failed to parse QASM {qasm_version}: {e}"}
+    circuit_list = [qasm_circuits] if isinstance(qasm_circuits, str) else list(qasm_circuits)
+    if not circuit_list:
+        return {"error": "qasm_circuits must be a non-empty string or list of strings."}
+    if len(circuit_list) > 1 and initial_layout is not None:
+        return {"error": "initial_layout is only valid for a single-circuit submission -- "
+                          "not meaningful once multiple independent circuits are tiled together."}
+
+    parsed_circuits = []
+    for i, qs in enumerate(circuit_list):
+        try:
+            c = qiskit_qasm3.loads(qs) if qasm_version == 3 else QuantumCircuit.from_qasm_str(qs)
+        except Exception as e:
+            return {"error": f"Failed to parse QASM {qasm_version} (circuit {i}): {e}"}
+        parsed_circuits.append(c)
+
     shots = max(1, min(shots, 20000))
 
     drift_alert = _recent_drift_alert(device_name)
@@ -760,6 +812,13 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
         backend = service.backend(device_name)
     except Exception as e:
         return {"error": f"Device '{device_name}' not found: {e}"}
+
+    rail_ranges = None
+    if len(parsed_circuits) == 1:
+        circuit = parsed_circuits[0]
+    else:
+        circuit, rail_ranges = _tile_circuits(parsed_circuits)
+
     quota_check = _check_ibm_quota_before_submitting(device_name, circuit, shots)
     if quota_check.get("error"):
         return quota_check
@@ -772,11 +831,15 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
     job = sampler.run([isa_circuit], shots=shots)
     _log_job_submission(job.job_id(), "submit_job", device_name, circuit.num_qubits,
                          circuit.depth(), isa_circuit.depth(), shots)
-    return {
+    result = {
         "job_id": job.job_id(), "status": str(job.status()),
         "device": device_name, "shots": shots,
         "initial_layout_used": initial_layout,
     }
+    if rail_ranges is not None:
+        result["rail_ranges"] = rail_ranges
+        result["num_rails"] = len(rail_ranges)
+    return result
 
 
 def job_status(job_id: str) -> dict:

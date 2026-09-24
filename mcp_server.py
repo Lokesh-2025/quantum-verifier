@@ -38,6 +38,9 @@ from core.templates import run_ghz_parity_check as _run_ghz_parity_check
 from core.templates import run_graph_coloring_search as _run_graph_coloring_search
 from core.hybrid_reduction_loop import run_hybrid_reduction_loop as _run_hybrid_reduction_loop
 from core.gradient_analysis import analyze_gradients_from_spec as _analyze_gradients_from_spec
+from core.parallel_rail_search import run_parallel_rail_search as _run_parallel_rail_search
+from core.singmaster_search import build_collision_rail as _build_collision_rail
+from core.singmaster_search import decode_collision_rail as _decode_collision_rail
 from core.optimal_backend import find_optimal_backend as _find_optimal_backend
 from core.multi_compiler import diff_compilers as _diff_compilers
 from core.stabilizer import verify_stabilizer_circuit as _verify_stabilizer_circuit
@@ -358,6 +361,61 @@ def run_hybrid_reduction_loop(
                                     shots, top_n, initial_p_layers, initial_gamma, initial_beta),
         indent=2,
     )
+
+
+@mcp.tool()
+@_track_invocation
+def run_parallel_rail_search(
+    k_pairs: list,
+    provider: str,
+    target_device: str,
+    max_n1: int = 50,
+    max_n2: int = 30,
+    shots: int = 4096,
+    p_layers: int = 2,
+    gamma: float = 2.589,
+    beta: float = 0.501,
+) -> str:
+    """
+    Generic parallel-rail tiler applied to Singmaster's Conjecture
+    collision search (does C(n1,k1) = C(n2,k2) for some real n1, n2?) --
+    builds one real LNAA circuit per (k1,k2) pair in k_pairs and packs
+    them all into as few real jobs as possible on whichever provider is
+    named, instead of submitting one job per pair.
+
+    Generalizes quantum-hardware-mcp's run_parallel_collision_search
+    (real, proven, but IBM-only and hardcoded to this one problem) into a
+    reusable capability: the tiling logic (core/parallel_rail_search.py)
+    knows nothing about Singmaster's specifically, only how to place/
+    submit circuits per provider -- IBM has no native multi-circuit
+    batching, so rails get tiled into ONE combined circuit via qubit-
+    offset placement; IonQ has real native batching (and the same
+    $168.20 per-job floor gets shared across every rail in the batch,
+    not paid per rail); PennyLane/cudaq run each rail locally in
+    sequence (free, no floor to share).
+
+    provider can be "ibm", "ionq", "pennylane", or "cudaq" -- the latter
+    two are free and useful for checking a k_pairs list actually produces
+    real collisions before spending real hardware time.
+
+    (k1,k2) pairs with no real collision in [max_n1, max_n2] are silently
+    dropped, same as the original tool's behavior, not submitted as
+    meaningless circuits.
+    """
+    rail_specs = []
+    for pair in k_pairs:
+        k1, k2 = int(pair[0]), int(pair[1])
+        qc, marked_rows = _build_collision_rail(k1, k2, max_n1, max_n2, p_layers, gamma, beta)
+        if qc is None:
+            continue
+        rail_specs.append({
+            "circuit": qc,
+            "decode": lambda counts, mr=marked_rows, nq=qc.num_qubits: _decode_collision_rail(counts, mr, nq),
+            "label": f"C(n,{k1})=C(m,{k2})",
+        })
+    if not rail_specs:
+        return json.dumps({"error": "No real collision found for any (k1,k2) pair in the given range."})
+    return json.dumps(_run_parallel_rail_search(rail_specs, provider, target_device, shots), indent=2)
 
 
 @mcp.tool()

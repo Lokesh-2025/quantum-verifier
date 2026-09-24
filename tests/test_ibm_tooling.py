@@ -17,8 +17,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 import providers.ibm as ibm
-from providers.ibm import ibm_account_check, _check_ibm_quota_before_submitting
+from providers.ibm import ibm_account_check, _check_ibm_quota_before_submitting, submit_job
 from qiskit import QuantumCircuit
+from qiskit.qasm2 import dumps as qasm2_dumps
 
 
 @pytest.fixture(autouse=True)
@@ -94,3 +95,19 @@ def test_quota_check_boundary_logic_directly():
         pytest.skip("no operational IBM backend available right now")
     result = _check_ibm_quota_before_submitting(backend_name, qc, shots=100000)
     assert result["error"] is not None, "an enormous shot count must exceed any real remaining quota"
+
+
+# --------------------------------------------------------------- multi-circuit tiling
+
+def test_submit_job_rejects_empty_circuit_list():
+    result = submit_job("ibm_fez", [], shots=100)
+    assert "error" in result
+
+
+def test_submit_job_rejects_initial_layout_with_multiple_circuits():
+    r0 = QuantumCircuit(1, 1); r0.x(0); r0.measure(0, 0)
+    r1 = QuantumCircuit(1, 1); r1.x(0); r1.measure(0, 0)
+    result = submit_job("ibm_fez", [qasm2_dumps(r0), qasm2_dumps(r1)], shots=100,
+                         initial_layout=[0])
+    assert "error" in result
+    assert "initial_layout" in result["error"]

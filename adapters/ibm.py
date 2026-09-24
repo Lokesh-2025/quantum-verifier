@@ -31,8 +31,11 @@ class IBMAdapter(QuantumBackendAdapter):
         return ibm.get_device_details(device_name)
 
     def submit_job(self, device_name: str, qasm_circuits, shots: int = 1024, **kwargs):
-        qasm_string = qasm_circuits[0] if isinstance(qasm_circuits, list) else qasm_circuits
-        return ibm.submit_job(device_name, qasm_string, shots, **kwargs)
+        # providers.ibm.submit_job now genuinely accepts a list -- more than
+        # one circuit gets tiled into a single combined job via qubit-offset
+        # placement. Forward the real list, don't silently drop anything
+        # past index 0 the way this used to.
+        return ibm.submit_job(device_name, qasm_circuits, shots, **kwargs)
 
     def job_status(self, job_id: str, **kwargs):
         return ibm.job_status(job_id)
