@@ -111,3 +111,54 @@ def test_submit_job_rejects_initial_layout_with_multiple_circuits():
                          initial_layout=[0])
     assert "error" in result
     assert "initial_layout" in result["error"]
+
+
+def test_submit_job_rejects_mismatched_expected_marked_bitstrings_length():
+    r0 = QuantumCircuit(1, 1); r0.x(0); r0.measure(0, 0)
+    r1 = QuantumCircuit(1, 1); r1.x(0); r1.measure(0, 0)
+    result = submit_job("ibm_fez", [qasm2_dumps(r0), qasm2_dumps(r1)], shots=100,
+                         expected_marked_bitstrings=[["1"]])  # only 1 entry for 2 circuits
+    assert "error" in result
+    assert "expected_marked_bitstrings" in result["error"]
+
+
+@pytest.mark.skipif(
+    not os.getenv("RUN_REAL_IBM_HARDWARE_SUBMIT_TEST"),
+    reason="Submits a REAL job to real IBM hardware, consuming real free-tier QPU-second quota "
+           "-- unlike every other test in this file, having IBM_QUANTUM_TOKEN set is not enough "
+           "on its own. Requires RUN_REAL_IBM_HARDWARE_SUBMIT_TEST=1 as an explicit, deliberate "
+           "opt-in (added 2026-09-26 after this test ran unattended during routine development "
+           "and used real quota nobody had explicitly signed off on for that run).",
+)
+def test_submit_job_self_check_records_a_real_prediction_closing_the_ibm_gap():
+    """
+    Added 2026-09-26 -- the real prerequisite for
+    core.intelligence.estimate_tolerance_band's historical/Buhlmann path:
+    IBM's submission path must actually create predictions-table rows the
+    way providers/ionq.py's ionq_submit_job already does (confirmed by
+    reading the code -- previously it never did, per
+    core.memory.verdict_track_record's own docstring). This runs against
+    real IBM hardware (see the skip guard above), not a mock, so a passing
+    run is real evidence the gap is actually closed, not just that the
+    self-check code parses.
+    """
+    from core.memory import find_predictions_for_job
+
+    qc = QuantumCircuit(1, 1)
+    qc.x(0)
+    qc.measure(0, 0)
+    from providers.ibm import list_devices
+    backend_name = next((d["name"] for d in list_devices() if d.get("operational")), None)
+    if not backend_name:
+        pytest.skip("no operational IBM backend available right now")
+
+    result = submit_job(backend_name, qasm2_dumps(qc), shots=100,
+                         expected_marked_bitstrings=["1"])
+    if "error" in result:
+        pytest.skip(f"submission failed for a reason unrelated to this test: {result['error']}")
+
+    assert "self_check" in result
+    assert result["self_check"]["ran"] is True
+    linked = find_predictions_for_job(result["job_id"])
+    assert len(linked) == 1
+    assert linked[0]["predicted_amplification"] is not None

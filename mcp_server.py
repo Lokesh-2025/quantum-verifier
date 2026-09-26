@@ -33,6 +33,7 @@ from core.robustness import find_robust_circuit as _find_robust_circuit
 from core.memory import memory_summary as _memory_summary
 from core.memory import verdict_track_record as _verdict_track_record
 from core.memory import shadow_mode_disagreement_log as _shadow_mode_disagreement_log
+from core.memory import tolerance_v2_disagreement_log as _tolerance_v2_disagreement_log
 from core.intelligence import recommend_tolerance as _recommend_tolerance
 from core.templates import run_ghz_parity_check as _run_ghz_parity_check
 from core.templates import run_graph_coloring_search as _run_graph_coloring_search
@@ -212,6 +213,24 @@ def shadow_mode_disagreement_log(limit: int = 50) -> str:
     review this after real experiments accumulate — not synthetic ones.
     """
     return json.dumps(_shadow_mode_disagreement_log(limit), indent=2)
+
+
+@mcp.tool()
+@_track_invocation
+def tolerance_v2_disagreement_log(limit: int = 50) -> str:
+    """
+    Every verify_experiment call with a known-answer claim quietly logs
+    whether the old flat-percentage tolerance and the new decomposed
+    statistical+systematic estimate (core.intelligence.estimate_tolerance_band)
+    agreed on whether the result was within tolerance — same shadow-mode
+    pattern as shadow_mode_disagreement_log, for the newer estimator. This
+    reads that log back: how many comparisons so far, how many disagreed,
+    and the full detail of each disagreement.
+
+    The new estimate never gates verify()'s real verdict yet — review this
+    after real experiments accumulate before trusting it to.
+    """
+    return json.dumps(_tolerance_v2_disagreement_log(limit), indent=2)
 
 
 @mcp.tool()
@@ -531,7 +550,8 @@ def device_on_date(device_name: str, date: str) -> str:
 @mcp.tool()
 @_track_invocation
 def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_version: int = 2,
-                initial_layout: list = None, confirm_despite_drift_alert: bool = False) -> str:
+                initial_layout: list = None, confirm_despite_drift_alert: bool = False,
+                expected_marked_bitstrings: list = None) -> str:
     """
     Compile and submit a circuit to an IBM quantum computer. Prefer calling
     verify_experiment first.
@@ -545,10 +565,18 @@ def submit_job(device_name: str, qasm_string: str, shots: int = 1024, qasm_versi
     confirm_despite_drift_alert : must be True to submit anyway if this
         device had a real calibration alert (T1/T2 drop, cx/readout error
         spike) in the last 24 hours — checked automatically every call.
+    expected_marked_bitstrings : optional, added 2026-09-26. When given,
+        runs a real noise-aware self-check simulation and records the
+        predicted amplification in Experiment Memory — the real IBM-side
+        parity fix for what was previously an IonQ-only prediction-
+        tracking gap (see memory_summary/recommend_tolerance). Call
+        ibm_sync_memory_for_job once the real job completes to close the
+        loop with the real result.
     """
     return json.dumps(get_adapter("ibm").submit_job(
         device_name, qasm_string, shots, qasm_version=qasm_version,
         initial_layout=initial_layout, confirm_despite_drift_alert=confirm_despite_drift_alert,
+        expected_marked_bitstrings=expected_marked_bitstrings,
     ), indent=2)
 
 
@@ -564,6 +592,21 @@ def job_status(job_id: str) -> str:
 def job_results(job_id: str) -> str:
     """Measurement counts from a completed IBM job."""
     return json.dumps(get_adapter("ibm").job_results(job_id), indent=2)
+
+
+@mcp.tool()
+@_track_invocation
+def ibm_sync_memory_for_job(job_id: str) -> str:
+    """
+    Completes Experiment Memory for a real IBM job once it's actually
+    finished: fetches its real result and records it against the
+    prediction submit_job made automatically at submission time (when
+    expected_marked_bitstrings was given). Call this after a job you
+    submitted through submit_job has completed. Scoped to single-circuit
+    jobs for now — see the function's own docstring for why tiled
+    multi-rail jobs aren't supported yet.
+    """
+    return json.dumps(ibm.ibm_sync_memory_for_job(job_id), indent=2)
 
 
 @mcp.tool()

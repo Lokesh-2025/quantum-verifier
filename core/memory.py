@@ -83,6 +83,31 @@ def _connect():
         "old_check_within_tolerance", "old_check_tolerance_used", "agree",
     ])
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS tolerance_v2_comparisons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            target_device TEXT NOT NULL,
+            circuit_hash TEXT NOT NULL,
+            source TEXT NOT NULL,
+            old_tolerance REAL NOT NULL,
+            old_tolerance_source TEXT NOT NULL,
+            old_within_tolerance INTEGER NOT NULL,
+            new_tolerance REAL NOT NULL,
+            new_statistical REAL NOT NULL,
+            new_systematic REAL NOT NULL,
+            new_systematic_source TEXT NOT NULL,
+            new_within_tolerance INTEGER NOT NULL,
+            agree INTEGER NOT NULL
+        )
+    """)
+    assert_schema_matches(conn, "tolerance_v2_comparisons", [
+        "id", "timestamp", "provider", "target_device", "circuit_hash", "source",
+        "old_tolerance", "old_tolerance_source", "old_within_tolerance",
+        "new_tolerance", "new_statistical", "new_systematic", "new_systematic_source",
+        "new_within_tolerance", "agree",
+    ])
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS tool_invocations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
@@ -391,6 +416,101 @@ def record_shadow_mode_comparison(provider: str, target_device: str, qasm_string
     )
     conn.commit()
     conn.close()
+
+
+def record_tolerance_v2_comparison(provider: str, target_device: str, qasm_string: str,
+                                    old_check: dict, old_tolerance: float, old_tolerance_source: str,
+                                    new_estimate: dict, source: str = "verify_experiment") -> None:
+    """
+    Added 2026-09-26, shadow-mode logging for the decomposed statistical+
+    systematic tolerance estimator (core.intelligence.estimate_tolerance_band),
+    following the exact pattern record_shadow_mode_comparison above already
+    proved out for ground_truth_significance_test: log the old flat-
+    tolerance verdict next to the new decomposed one for every real
+    verify() call with a claim, before either is trusted to change what
+    actually gates the verdict. Read this back the same way
+    shadow_mode_disagreement_log is meant to be read — after real
+    experiments accumulate, not synthetic ones.
+
+    Silently no-ops if either side isn't applicable — nothing to compare.
+    """
+    if not (old_check.get("applicable") and new_estimate.get("applicable")):
+        return
+
+    import datetime
+    expected = old_check["expected_amplification"]
+    observed = old_check["observed_amplification"]
+    new_tolerance = new_estimate["tolerance"]
+    new_lo = expected * (1 - new_tolerance)
+    new_hi = expected * (1 + new_tolerance)
+    new_within = new_lo <= observed <= new_hi
+    old_within = old_check["within_tolerance"]
+
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO tolerance_v2_comparisons (timestamp, provider, target_device, circuit_hash, "
+        "source, old_tolerance, old_tolerance_source, old_within_tolerance, new_tolerance, "
+        "new_statistical, new_systematic, new_systematic_source, new_within_tolerance, agree) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (datetime.datetime.now(datetime.timezone.utc).isoformat(), provider, target_device,
+         _circuit_hash(qasm_string), source, old_tolerance, old_tolerance_source, int(old_within),
+         new_tolerance, new_estimate["statistical"], new_estimate["systematic"],
+         new_estimate["systematic_source"], int(new_within), int(old_within == new_within)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def tolerance_v2_disagreement_log(limit: int = 50) -> dict:
+    """
+    Read back the tolerance-v2 shadow-mode comparison log, the same way
+    shadow_mode_disagreement_log is meant to be read: surfaces raw
+    disagreements between the old flat-tolerance check and the new
+    decomposed statistical+systematic estimate, for a human to review once
+    real experiments accumulate — doesn't recommend graduating the new
+    estimate on its own.
+
+    Excludes known-synthetic sources (_NON_REAL_SOURCES) — same reasoning
+    as the other read-back functions in this file.
+    """
+    conn = _connect()
+    placeholders = ",".join("?" for _ in _NON_REAL_SOURCES)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM tolerance_v2_comparisons WHERE source NOT IN ({placeholders})",
+        list(_NON_REAL_SOURCES),
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT timestamp, provider, target_device, circuit_hash, source, old_tolerance, "
+        "old_tolerance_source, old_within_tolerance, new_tolerance, new_statistical, "
+        "new_systematic, new_systematic_source, new_within_tolerance FROM tolerance_v2_comparisons "
+        f"WHERE agree = 0 AND source NOT IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+        list(_NON_REAL_SOURCES) + [limit],
+    ).fetchall()
+    conn.close()
+
+    disagreement_rows = [
+        {
+            "timestamp": ts, "provider": prov, "target_device": dev, "circuit_hash": ch,
+            "source": src, "old_tolerance": old_tol, "old_tolerance_source": old_src,
+            "old_within_tolerance": bool(old_w), "new_tolerance": new_tol,
+            "new_statistical": new_stat, "new_systematic": new_sys,
+            "new_systematic_source": new_src, "new_within_tolerance": bool(new_w),
+        }
+        for ts, prov, dev, ch, src, old_tol, old_src, old_w, new_tol, new_stat, new_sys, new_src, new_w in rows
+    ]
+    return {
+        "total_comparisons_logged": total,
+        "disagreement_count": len(disagreement_rows),
+        "disagreements": disagreement_rows,
+        "note": (
+            "No comparisons logged yet — verify() needs to run with a claim "
+            "(expected_marked_bitstrings and expected_amplification) before there's anything here."
+            if total == 0 else
+            f"{len(disagreement_rows)} of {total} logged comparisons disagreed (showing up to "
+            f"{limit} most recent). Read these after real experiments accumulate, not synthetic "
+            "ones, before trusting the new estimator to gate anything on its own."
+        ),
+    }
 
 
 def shadow_mode_disagreement_log(limit: int = 50) -> dict:

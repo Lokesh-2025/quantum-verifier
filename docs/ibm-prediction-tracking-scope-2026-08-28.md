@@ -1,5 +1,16 @@
 # Scoping note: IBM prediction-tracking parity with IonQ
 
+**RESOLVED 2026-09-26** — built as part of the ground-truth-check/tolerance-band
+redesign (job-einstein consultation with Gemini/GPT/a second Claude
+instance). See `providers/ibm.py:submit_job`'s `expected_marked_bitstrings`
+parameter and new `ibm_sync_memory_for_job`, and the README's "IBM
+prediction-tracking parity" section. The two open design questions below
+were resolved as: **no self-check gating** (IBM's self-check records the
+prediction but does not refuse submission the way IonQ's does — that
+comparison stays `verify_experiment`'s job), and the sync function is
+**manual, single-circuit-only** for this pass, same as IonQ's. Left below
+for the historical record of what was actually investigated.
+
 Date: 2026-08-28. Deliberately a scoping note, not a build — captures the real shape of the gap so the next session starts from what's already known instead of re-discovering it. No solution designed here on purpose.
 
 ## What was asked for

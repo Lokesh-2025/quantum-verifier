@@ -302,10 +302,46 @@ def cross_check_fidelity_estimate(circuit: QuantumCircuit, hw_result: dict, shot
     }
 
 
+def wilson_score_interval(successes: int, total: int, alpha: float = 0.05) -> tuple:
+    """
+    Wilson score confidence interval at the (1 - 2*alpha) level -- see
+    ground_truth_significance_test's docstring for why this uses a single
+    alpha (paired with two one-sided tests at level alpha each) rather
+    than the conventional alpha/2 two-sided construction. Extracted
+    2026-09-26 from that function's inline math so core.intelligence's
+    tolerance-band estimator can reuse the identical computation instead
+    of a second, driftable copy.
+    """
+    from scipy.stats import norm
+    if total <= 0:
+        return 0.0, 1.0
+    z = float(norm.ppf(1 - alpha))
+    phat = successes / total
+    z2 = z * z
+    denom = 1 + z2 / total
+    center = (phat + z2 / (2 * total)) / denom
+    half_width = (z * math.sqrt(phat * (1 - phat) / total + z2 / (4 * total * total))) / denom
+    ci_lo = max(0.0, center - half_width)
+    ci_hi = min(1.0, center + half_width)
+    return ci_lo, ci_hi
+
+
 # ---------------------------------------------------------------- step 5
 def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
-                        expected_amplification: float, tolerance: float = 0.5) -> dict:
-    """Compare a hardware-aware simulation's result against a KNOWN expected answer."""
+                        expected_amplification: float, tolerance: float = 0.5,
+                        tolerance_breakdown: dict = None) -> dict:
+    """
+    Compare a hardware-aware simulation's result against a KNOWN expected
+    answer.
+
+    tolerance_breakdown : optional, added 2026-09-26. The output of
+    core.intelligence.estimate_tolerance_band, passed through by verify()
+    purely for visibility -- this does NOT change `tolerance` or the
+    within_tolerance verdict below (that estimator is shadow-mode only for
+    now, see core.memory.record_tolerance_v2_comparison). Surfaced here so
+    a caller can see the statistical/systematic split and its data source
+    alongside the actual decision, never a silent number.
+    """
     if not hw_counts:
         return {"applicable": False, "note": "No counts available (IBM path returns a fidelity estimate, not counts)."}
     total = sum(hw_counts.values())
@@ -316,7 +352,7 @@ def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
     lo = expected_amplification * (1 - tolerance)
     hi = expected_amplification * (1 + tolerance)
     within = lo <= observed_amp <= hi
-    return {
+    result = {
         "applicable": True, "observed_amplification": round(observed_amp, 3),
         "expected_amplification": expected_amplification,
         "within_tolerance": within,
@@ -325,6 +361,9 @@ def ground_truth_check(hw_counts: dict, expected_marked_bitstrings: list,
                     f"hardware-predicted behavior ({round(observed_amp, 2)}x) — the experiment "
                     "cannot currently support this claim."),
     }
+    if tolerance_breakdown is not None:
+        result["tolerance_breakdown"] = tolerance_breakdown
+    return result
 
 
 def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: list,
@@ -448,12 +487,7 @@ def ground_truth_significance_test(hw_counts: dict, expected_marked_bitstrings: 
     # -> a 90% CI). Used for the real VERIFIED/FAIL/INCONCLUSIVE call.
     z = float(norm.ppf(1 - alpha))
     phat = marked_shots / total
-    z2 = z * z
-    denom = 1 + z2 / total
-    center = (phat + z2 / (2 * total)) / denom
-    half_width = (z * math.sqrt(phat * (1 - phat) / total + z2 / (4 * total * total))) / denom
-    ci_lo = max(0.0, center - half_width)
-    ci_hi = min(1.0, center + half_width)
+    ci_lo, ci_hi = wilson_score_interval(marked_shots, total, alpha)
 
     if ci_hi < p_lo or ci_lo > p_hi:
         tost_verdict = "FAIL"
@@ -1187,8 +1221,18 @@ def verify(
         result["fidelity_cross_check"] = adapter.cross_check_fidelity(circuit, hw, shots)
 
     if expected_marked_bitstrings and expected_amplification is not None:
+        # Decomposed statistical+systematic tolerance estimate (added
+        # 2026-09-26, job-einstein background in the project journal) --
+        # shadow-mode only, see core.memory.record_tolerance_v2_comparison
+        # below. Never changes `amplification_tolerance`/the actual verdict
+        # this pass, only logged alongside it for comparison.
+        from core.intelligence import estimate_tolerance_band
+        tolerance_v2 = estimate_tolerance_band(
+            provider, target_device, hw, expected_marked_bitstrings, default=amplification_tolerance)
+
         gt = ground_truth_check(hw.get("counts"), expected_marked_bitstrings,
-                                 expected_amplification, amplification_tolerance)
+                                 expected_amplification, amplification_tolerance,
+                                 tolerance_breakdown=tolerance_v2)
         result["ground_truth_check"] = gt
         # Informational only for now, not wired to block — see this
         # function's own docstring for why it exists alongside the older
@@ -1202,10 +1246,13 @@ def verify(
         # there's a real claim to compare against. Informational only.
         result["reversed_bitstring_check"] = detect_reversed_bitstring_convention(
             expected_marked_bitstrings, hw.get("counts"))
-        from core.memory import record_shadow_mode_comparison
+        from core.memory import record_shadow_mode_comparison, record_tolerance_v2_comparison
         record_shadow_mode_comparison(provider, target_device, qasm_string,
                                        gt, result["ground_truth_significance_test"],
                                        old_check_tolerance=amplification_tolerance)
+        record_tolerance_v2_comparison(provider, target_device, qasm_string,
+                                        gt, amplification_tolerance, tolerance_source,
+                                        tolerance_v2)
         if gt.get("applicable") and not gt["within_tolerance"]:
             return {**result, "verdict": "BLOCK", "reason": gt["verdict"]}
     else:

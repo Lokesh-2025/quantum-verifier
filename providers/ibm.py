@@ -755,7 +755,8 @@ def _tile_circuits(circuits: list) -> tuple:
 
 
 def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version: int = 2,
-                initial_layout: list = None, confirm_despite_drift_alert: bool = False) -> dict:
+                initial_layout: list = None, confirm_despite_drift_alert: bool = False,
+                expected_marked_bitstrings=None) -> dict:
     """
     Compile and submit one or more circuits to an IBM quantum computer.
 
@@ -779,6 +780,22 @@ def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version:
         error spike) in the last 24 hours, checked automatically against
         this project's own local history. Ported from quantum-hardware-mcp
         2026-08-24.
+    expected_marked_bitstrings : optional, added 2026-09-26, mirrors
+        providers/ionq.py's ionq_submit_job self-check. Either a single
+        list of bitstrings (one circuit submitted) or a list with one
+        entry per circuit (None to skip that circuit's check). When given,
+        runs a real noise-aware self-check simulation of each INPUT
+        circuit (before tiling) and records the predicted amplification
+        via core.memory.record_prediction — closing the real gap where
+        IBM's submission path never fed the intelligence layer's
+        historical accuracy tracking the way IonQ's already does (see
+        core.memory.verdict_track_record's own docstring, and
+        core.intelligence.estimate_tolerance_band, which is what this data
+        is actually for). This does NOT gate submission on a claim the way
+        IonQ's self-check does — that comparison belongs to
+        verify()/ground_truth_check, not submission. Call
+        ibm_sync_memory_for_job once the real job completes to attach the
+        real result.
     """
     circuit_list = [qasm_circuits] if isinstance(qasm_circuits, str) else list(qasm_circuits)
     if not circuit_list:
@@ -786,6 +803,25 @@ def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version:
     if len(circuit_list) > 1 and initial_layout is not None:
         return {"error": "initial_layout is only valid for a single-circuit submission -- "
                           "not meaningful once multiple independent circuits are tiled together."}
+
+    n_circuits = len(circuit_list)
+
+    def _per_circuit(value, param_name):
+        if value is None:
+            return [None] * n_circuits
+        if n_circuits == 1:
+            return [value]
+        if not isinstance(value, list) or len(value) != n_circuits:
+            raise ValueError(
+                f"{param_name}: submitting {n_circuits} circuits requires a list of "
+                f"{n_circuits} entries (one per circuit, None to skip that circuit's check)"
+            )
+        return value
+
+    try:
+        marked_per_circuit = _per_circuit(expected_marked_bitstrings, "expected_marked_bitstrings")
+    except ValueError as ve:
+        return {"error": str(ve)}
 
     parsed_circuits = []
     for i, qs in enumerate(circuit_list):
@@ -813,6 +849,44 @@ def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version:
     except Exception as e:
         return {"error": f"Device '{device_name}' not found: {e}"}
 
+    # Self-check: a real noise-aware simulation of each INPUT circuit
+    # (before tiling), mirroring providers/ionq.py's ionq_submit_job
+    # pattern -- see the docstring above for why this matters. Only builds
+    # the (comparatively expensive) NoiseModel.from_backend() once per
+    # submit_job call, not once per circuit.
+    self_check = None
+    if any(marked_per_circuit):
+        from qiskit import qasm2
+        from qiskit_aer import AerSimulator
+        from qiskit_aer.noise import NoiseModel
+        from core.memory import record_prediction
+        try:
+            noise_model = NoiseModel.from_backend(backend)
+            noisy_backend = AerSimulator(noise_model=noise_model, coupling_map=backend.coupling_map,
+                                          basis_gates=noise_model.basis_gates)
+            self_check = {"ran": True, "per_circuit": []}
+            for i, qc in enumerate(parsed_circuits):
+                entry = {"circuit_index": i}
+                circuit_marked = marked_per_circuit[i]
+                if circuit_marked:
+                    pm_i = generate_preset_pass_manager(backend=backend, optimization_level=1)
+                    isa_i = pm_i.run(qc)
+                    sim_counts = noisy_backend.run(isa_i, shots=shots).result().get_counts()
+                    total = sum(sim_counts.values())
+                    marked = set(circuit_marked)
+                    marked_shots = sum(c for b, c in sim_counts.items() if b in marked)
+                    sim_amp = (marked_shots / total) / (len(marked) / (2 ** qc.num_qubits)) if total else 0
+                    entry["simulated_amplification"] = round(sim_amp, 3)
+                    pred = record_prediction(
+                        qasm2.dumps(qc), provider="ibm", target_device=device_name,
+                        predicted_amplification=sim_amp, marked_bitstrings=circuit_marked,
+                        source="ibm_submit_job_self_check", circuit_index_in_job=i,
+                    )
+                    entry["memory_prediction_id"] = pred.get("prediction_id")
+                self_check["per_circuit"].append(entry)
+        except Exception as e:
+            self_check = {"ran": False, "error": str(e)}
+
     rail_ranges = None
     if len(parsed_circuits) == 1:
         circuit = parsed_circuits[0]
@@ -831,6 +905,14 @@ def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version:
     job = sampler.run([isa_circuit], shots=shots)
     _log_job_submission(job.job_id(), "submit_job", device_name, circuit.num_qubits,
                          circuit.depth(), isa_circuit.depth(), shots)
+
+    if self_check and self_check.get("ran"):
+        from core.memory import attach_job_id
+        for entry in self_check.get("per_circuit", []):
+            pred_id = entry.get("memory_prediction_id")
+            if pred_id:
+                attach_job_id(pred_id, job.job_id())
+
     result = {
         "job_id": job.job_id(), "status": str(job.status()),
         "device": device_name, "shots": shots,
@@ -839,6 +921,8 @@ def submit_job(device_name: str, qasm_circuits, shots: int = 1024, qasm_version:
     if rail_ranges is not None:
         result["rail_ranges"] = rail_ranges
         result["num_rails"] = len(rail_ranges)
+    if self_check is not None:
+        result["self_check"] = self_check
     return result
 
 
@@ -905,6 +989,72 @@ def job_results(job_id: str) -> dict:
     return {
         "job_id": job_id, "status": "DONE", "backend": job.backend().name,
         "total_shots": total_shots, "counts": counts,
+    }
+
+
+def ibm_sync_memory_for_job(job_id: str) -> dict:
+    """
+    Added 2026-09-26. Completes Experiment Memory for a real IBM job,
+    mirroring providers/ionq.py:ionq_sync_memory_for_job -- fetches the
+    real result via job_results() and records it against the matching
+    prediction made at submission time by submit_job's self-check.
+
+    Scoped to single-circuit jobs for this pass: IBM's real submission
+    path combines multiple input circuits into ONE tiled circuit rather
+    than IonQ's native per-circuit batching (see _tile_circuits), so a
+    multi-rail job's real result would need the same qubit-range slicing
+    core/parallel_rail_search.py's _run_ibm_tiled already does. Not
+    duplicated here since rail_ranges isn't preserved by job_results (only
+    returned at submission time) -- a real, honest scope boundary for this
+    pass, not a silent gap: multi-rail jobs are reported as such below
+    rather than producing a wrong number.
+
+    Call this once a job submitted through submit_job (with
+    expected_marked_bitstrings/expected_amplification given) has actually
+    completed -- nothing calls this automatically, mirroring IonQ's
+    equivalent function.
+    """
+    from core.memory import find_predictions_for_job, record_real_result
+
+    predictions = find_predictions_for_job(job_id)
+    if not predictions:
+        return {"error": f"No predictions in memory are linked to job {job_id}."}
+    if len(predictions) > 1:
+        return {
+            "error": f"Job {job_id} has {len(predictions)} linked predictions (a tiled "
+                     "multi-circuit job) -- real-result syncing for tiled jobs isn't built yet, "
+                     "only single-circuit jobs. See this function's docstring.",
+        }
+
+    results = job_results(job_id)
+    if results.get("error") or results.get("status") != "DONE":
+        return {"error": f"Job {job_id} not ready: {results.get('note') or results.get('error')}"}
+
+    counts = results.get("counts")
+    if not isinstance(counts, dict):
+        return {"error": "Job result counts are not in the expected single-register shape."}
+
+    pred = predictions[0]
+    marked_bitstrings = pred["marked_bitstrings"] or []
+    if not marked_bitstrings:
+        return {"error": "Linked prediction has no marked_bitstrings recorded -- cannot compute "
+                          "a real amplification."}
+
+    total = sum(counts.values())
+    marked = set(marked_bitstrings)
+    n_qubits = len(next(iter(counts.keys())))
+    marked_shots = sum(c for b, c in counts.items() if b in marked)
+    baseline = len(marked) / (2 ** n_qubits)
+    real_amp = (marked_shots / total) / baseline if total and baseline else None
+
+    record_real_result(pred["prediction_id"], real_amp, real_job_id=job_id)
+    return {
+        "job_id": job_id,
+        "synced": [{
+            "prediction_id": pred["prediction_id"],
+            "predicted_amplification": pred["predicted_amplification"],
+            "real_amplification": round(real_amp, 3) if real_amp is not None else None,
+        }],
     }
 
 
