@@ -188,10 +188,6 @@ def collect() -> None:
     ibm_device_rows, qubit_rows, pair_rows = collect_ibm()
     ionq_device_rows = collect_ionq()
 
-    _append_csv(DEVICE_CSV, DEVICE_FIELDS, ibm_device_rows + ionq_device_rows)
-    _append_csv(QUBIT_CSV, QUBIT_FIELDS, qubit_rows)
-    _append_csv(PAIR_CSV, PAIR_FIELDS, pair_rows)
-
     print(f"Saved {len(ibm_device_rows)} IBM + {len(ionq_device_rows)} IonQ device rows, "
           f"{len(qubit_rows)} qubit rows, {len(pair_rows)} pair rows.")
 
@@ -214,8 +210,8 @@ def _write_turso(device_rows: list, qubit_rows: list, pair_rows: list) -> None:
     from core.turso import is_configured, execute_batch
 
     if not is_configured():
-        print("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN not set — skipping live DB write.")
-        return
+        print("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN not set — nothing was saved.", file=sys.stderr)
+        sys.exit(1)
 
     BATCH = 500
 
@@ -251,7 +247,8 @@ def _write_turso(device_rows: list, qubit_rows: list, pair_rows: list) -> None:
         print(f"Turso: wrote {len(device_rows)} device, {len(qubit_rows)} qubit, "
               f"{len(pair_rows)} pair rows — live for anyone running the tool now.")
     except Exception as e:
-        print(f"Turso write failed (CSV already saved, so history isn't lost): {e}", file=sys.stderr)
+        print(f"Turso write failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

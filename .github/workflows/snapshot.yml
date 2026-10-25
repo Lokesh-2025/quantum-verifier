@@ -2,15 +2,14 @@ name: Quantum Snapshot
 
 on:
   schedule:
-    # Every 2 hours — matches quantum-hardware-mcp's cloud collector, so
-    # this repo's own history stops depending on the laptop being on.
+    # Every 2 hours. Turso is the single source of truth (no CSV commits,
+    # no laptop dependency).
     - cron: '0 */2 * * *'
   # Allow a manual run from the GitHub Actions tab to test without waiting
   workflow_dispatch:
 
-# Needs write access to commit data/*.csv back to the repo
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   snapshot:
@@ -35,14 +34,3 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python cloud_snapshot.py
-
-      - name: Commit snapshot to repo
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/device_snapshots.csv data/qubit_snapshots.csv data/pair_snapshots.csv
-          # Only commit if something actually changed (skips if API returned nothing)
-          git diff --staged --quiet || \
-            git commit -m "data: cloud snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git pull --rebase origin master
-          git push
