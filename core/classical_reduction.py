@@ -32,6 +32,23 @@ from core.stabilizer import is_clifford_circuit, verify_stabilizer_circuit
 DISAGREEMENT_TVD_THRESHOLD = 0.01  # exact-vs-exact, so a real disagreement is tiny
 LOW_ENTANGLEMENT_ENTROPY_THRESHOLD = 0.05
 
+# verify_stabilizer_circuit lists every possible outcome, which doubles with each
+# qubit in superposition (16 -> 65,536 entries, ~11 MB). Claude Code drops an MCP
+# server that sends one message over 16 MB, so verify_experiment on a bigger
+# circuit killed the connection. This field is informational and never gates the
+# verdict, so show only the most likely outcomes; support_size still has the total.
+MAX_OUTCOMES_IN_REPORT = 64
+
+
+def _cap_outcomes(stabilizer_result: dict) -> dict:
+    probs = stabilizer_result.get("exact_probabilities")
+    if not probs or len(probs) <= MAX_OUTCOMES_IN_REPORT:
+        return stabilizer_result
+    top = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:MAX_OUTCOMES_IN_REPORT]
+    return {**stabilizer_result, "exact_probabilities": dict(top),
+            "exact_probabilities_truncated": True,
+            "exact_probabilities_shown": MAX_OUTCOMES_IN_REPORT}
+
 
 def _exact_probabilities(sv: Statevector) -> dict:
     return sv.probabilities_dict()
@@ -48,7 +65,7 @@ def classical_reduction_check(circuit: QuantumCircuit) -> dict:
         return {
             "applicable": True, "method": "stabilizer_exact_deferral",
             "classically_resolvable": True,
-            "stabilizer_result": verify_stabilizer_circuit(circuit),
+            "stabilizer_result": _cap_outcomes(verify_stabilizer_circuit(circuit)),
             "note": "Clifford circuit -- exactly solved in polynomial time by "
                     "core/stabilizer.py's Gottesman-Knill tableau; a general-purpose "
                     "classical simulator was not invoked because it adds nothing here.",
