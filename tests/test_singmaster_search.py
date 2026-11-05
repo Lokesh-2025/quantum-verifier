@@ -2,8 +2,17 @@
 Tests for core/singmaster_search.py -- the first real plugin for the
 generic parallel-rail tiler.
 """
+import importlib.util
+
+import pytest
+
 from core.singmaster_search import find_collision, build_collision_rail, decode_collision_rail
 from adapters.cudaq_adapter import run_circuit
+
+
+needs_cudaq = pytest.mark.skipif(
+    importlib.util.find_spec("cudaq") is None, reason="cudaq not installed"
+)
 
 
 def test_find_collision_matches_the_real_known_16_2_10_3_collision():
@@ -33,6 +42,7 @@ def test_build_collision_rail_produces_a_real_circuit_for_a_known_collision():
     assert len(marked_rows) == 1
 
 
+@needs_cudaq
 def test_decoded_amplification_is_real_and_strongly_favors_the_marked_state():
     """
     Runs the real circuit locally (CUDA-Q, free) and confirms the decoded

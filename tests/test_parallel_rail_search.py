@@ -8,14 +8,21 @@ Bell-state distribution and the exact always-1 distribution. The
 sequential (cudaq/pennylane) path is tested against real local execution
 using the Singmaster's plugin, since both are free and fast.
 """
+import importlib.util
 from unittest.mock import MagicMock
 
+import pytest
 from qiskit import QuantumCircuit
 from qiskit.qasm2 import dumps as qasm2_dumps
 
 from core.parallel_rail_search import run_parallel_rail_search, _run_ibm_tiled
 from core.singmaster_search import build_collision_rail, decode_collision_rail
 from providers.ibm import _tile_circuits
+
+
+needs_cudaq = pytest.mark.skipif(
+    importlib.util.find_spec("cudaq") is None, reason="cudaq not installed"
+)
 
 
 def test_tile_circuits_produces_correct_qubit_ranges_and_gates():
@@ -110,6 +117,7 @@ def test_ionq_free_simulator_path_honestly_flags_top5_only_results_as_approximat
     assert "top-5" in out[0]["decoded"]["note"]
 
 
+@needs_cudaq
 def test_sequential_path_runs_real_singmaster_rails_and_picks_the_real_best():
     qc1, mr1 = build_collision_rail(2, 3, max_n1=20, max_n2=15)
     qc2, mr2 = build_collision_rail(2, 4, max_n1=30, max_n2=20)

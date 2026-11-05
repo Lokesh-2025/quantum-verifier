@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # cudaq is a large optional extra; the few tests that need it skip
+      # themselves when it is not installed.
+      - name: Install dependencies
+        run: |
+          grep -v -i cudaq requirements.txt > requirements-ci.txt
+          pip install -r requirements-ci.txt pytest
+
+      # No API tokens are set here: tests that need a live IBM or IonQ
+      # account skip themselves.
+      - name: Run tests
+        run: python -m pytest -q
