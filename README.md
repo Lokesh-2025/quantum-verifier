@@ -1,5 +1,7 @@
 # quantum-verifier
 
+[![Qiskit Ecosystem](https://qisk.it/e-96800568)](https://qisk.it/e)
+
 A safety gate between an AI-generated Qiskit circuit and real quantum hardware. Before you spend QPU time or money, it checks that the circuit is well-formed, that it will survive real routing and native-gate constraints, and whether a claimed result is actually distinguishable from what hardware noise alone would produce, even when you don't know the right answer in advance.
 
 It runs as an [MCP](https://modelcontextprotocol.io) server, so an AI assistant (Claude, etc.) can call it directly.
