@@ -96,6 +96,11 @@ class IonQAdapter(QuantumBackendAdapter):
         return {
             "counts": counts, "total_shots": sum(counts.values()),
             "noise_model_used": noise_model_used,
+            "calibration_snapshot": {
+                "backend": target_device,
+                "noise_model": noise_model_used,
+                "note": "IonQ's named noise model uses fixed published rates, not a per-run calibration snapshot",
+            },
             "transpiled_gate_count": t_qc.size(),
             "simulation_type": simulation_type,
             "gate_synthesis_check": gate_synthesis_check(decomposed_circuit, t_qc),

@@ -9,6 +9,7 @@ needs to know which provider it's talking to.
 """
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
+from datetime import datetime, timezone
 import providers.ibm as ibm
 from providers.ibm import _get_service, _cx_errors_for_backend
 from adapters.base import QuantumBackendAdapter, AdapterCapabilityError
@@ -104,6 +105,15 @@ class IBMAdapter(QuantumBackendAdapter):
         transpiled_gates = dict(isa_circuit.count_ops())
         n_cx = transpiled_gates.get("cx", 0) + transpiled_gates.get("ecr", 0) + transpiled_gates.get("cz", 0)
         props = backend.properties()
+        # Pin which calibration this result was simulated against. Same string the
+        # collector stores as vendor_measured_at (in UTC), so the exact snapshot can be looked
+        # up later in raw_properties_archive (Turso) even after calibration drifts.
+        calibration_snapshot = {
+            "backend": target_device,
+            "vendor_measured_at": str(props.last_update_date.astimezone(timezone.utc)) if props else None,
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "source": "backend.properties() read at simulation time",
+        }
         cx_errors = _cx_errors_for_backend(props) if props else []
         avg_cx_error = sum(cx_errors) / len(cx_errors) if cx_errors else 0.005
         estimated_fidelity = round((1 - avg_cx_error) ** n_cx, 4) if n_cx > 0 else 1.0
@@ -124,6 +134,7 @@ class IBMAdapter(QuantumBackendAdapter):
         return {
             "counts": counts, "total_shots": total_shots,
             "estimated_fidelity": estimated_fidelity,
+            "calibration_snapshot": calibration_snapshot,
             "transpiled_gate_count": sum(transpiled_gates.values()),
             "n_two_qubit_gates": n_cx,
             "simulation_type": (
