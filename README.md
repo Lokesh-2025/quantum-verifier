@@ -15,6 +15,49 @@ It runs as an [MCP](https://modelcontextprotocol.io) server, so an AI assistant 
 | **Status** | Experimental. Interfaces may change. |
 | **License** | MIT |
 
+## Architecture
+
+```mermaid
+graph TD
+    Circuit["AI-generated circuit"]
+
+    subgraph Verifier["Verifier pipeline core/"]
+        Semantic["Semantic check"]
+        Topology["Topology check"]
+        Ideal["Ideal simulation"]
+        HW["Hardware-aware simulation<br/>real noise model"]
+        GateSynth["Gate synthesis check"]
+        Ground["Ground-truth check"]
+        Control["Control experiment<br/>falsify_claim"]
+        Robust["Robustness selection<br/>find_robust_circuit"]
+    end
+
+    subgraph Preflight["Preflight providers/"]
+        Account["Account / budget check"]
+        Devices["Device comparison"]
+        Cost["Real cost estimate"]
+    end
+
+    subgraph Learning["Learning core/memory.py intelligence.py"]
+        Mem[("Experiment Memory<br/>prediction vs. reality")]
+        Intel["Intelligence<br/>recommend_tolerance"]
+    end
+
+    Circuit --> Semantic --> Topology --> Ideal --> HW --> GateSynth --> Ground
+    HW --> Control
+    HW --> Robust
+    Account --> Cost
+    Devices --> Cost
+    Ground --> Verdict{"GO or BLOCK"}
+    Cost --> Verdict
+    Verdict -->|GO| Hardware["Real hardware"]
+    Hardware --> Mem
+    Mem --> Intel
+    Intel -.->|feeds back into| Ground
+```
+
+---
+
 ## What it does
 
 **`verify_experiment`** runs a circuit through a pipeline and returns GO or BLOCK with a human-readable reason:
